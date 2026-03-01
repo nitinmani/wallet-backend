@@ -1,0 +1,17 @@
+{
+  "name": "vencura",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace=apps/api",
+    "dev:web": "npm run dev --workspace=apps/web",
+    "build": "npm run build --workspaces",
+    "db:migrate": "npx prisma migrate dev --schema=apps/api/prisma/schema.prisma",
+    "db:generate": "npx prisma generate --schema=apps/api/prisma/schema.prisma",
+    "db:push": "npx prisma db push --schema=apps/api/prisma/schema.prisma",
+    "typecheck": "tsc --noEmit --project apps/api/tsconfig.json"
+  }
+}

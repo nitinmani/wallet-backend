@@ -1,0 +1,98 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String         @id @default(uuid())
+  email         String         @unique
+  apiKey        String         @unique
+  createdAt     DateTime       @default(now())
+  ownedWallets  Wallet[]       @relation("WalletOwner")
+  ownedWalletGroups WalletGroup[] @relation("WalletGroupOwner")
+  walletAccesses WalletAccess[]
+}
+
+model WalletGroup {
+  id           String   @id @default(uuid())
+  name         String   @default("Wallet Group")
+  encryptedKey String
+  ownerId      String?
+  owner        User?    @relation("WalletGroupOwner", fields: [ownerId], references: [id])
+  wallets      Wallet[]
+  createdAt    DateTime @default(now())
+}
+
+model Wallet {
+  id            String         @id @default(uuid())
+  name          String         @default("Default Wallet")
+  address       String?
+  encryptedKey  String?
+  type          WalletType     @default(STANDARD)
+  walletGroupId String?
+  walletGroup   WalletGroup?   @relation(fields: [walletGroupId], references: [id])
+  ownerId       String
+  owner         User           @relation("WalletOwner", fields: [ownerId], references: [id])
+  accesses      WalletAccess[]
+  balance       String         @default("0")
+  transactions  Transaction[]
+  lastSyncBlock Int            @default(0)
+  createdAt     DateTime       @default(now())
+}
+
+enum WalletType {
+  STANDARD
+  GROUPED
+}
+
+model WalletAccess {
+  id        String   @id @default(uuid())
+  walletId  String
+  wallet    Wallet   @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([walletId, userId])
+}
+
+model Transaction {
+  id        String   @id @default(uuid())
+  walletId  String
+  wallet    Wallet   @relation(fields: [walletId], references: [id])
+  type      TxType
+  assetType AssetType @default(NATIVE)
+  assetSymbol String  @default("ETH")
+  tokenAddress String?
+  tokenDecimals Int?
+  to        String?
+  from      String?
+  amount    String
+  txHash    String?
+  nonce     Int?
+  gasPrice  String?
+  status    TxStatus @default(PENDING)
+  createdAt DateTime @default(now())
+}
+
+enum TxType {
+  DEPOSIT
+  WITHDRAWAL
+  INTERNAL
+}
+
+enum TxStatus {
+  PENDING
+  BROADCASTING
+  CONFIRMED
+  FAILED
+}
+
+enum AssetType {
+  NATIVE
+  ERC20
+}

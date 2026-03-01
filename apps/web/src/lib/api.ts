@@ -1,0 +1,170 @@
+const API_BASE = "/api";
+
+function formatWeiToEth(wei: string): string {
+  try {
+    const value = BigInt(wei);
+    const base = BigInt(10) ** BigInt(18);
+    const whole = value / base;
+    const fraction = (value % base)
+      .toString()
+      .padStart(18, "0")
+      .slice(0, 6)
+      .replace(/0+$/, "");
+    return fraction ? `${whole}.${fraction}` : whole.toString();
+  } catch {
+    return wei;
+  }
+}
+
+function normalizeApiErrorMessage(message: string): string {
+  const raw = (message || "").trim();
+  const lower = raw.toLowerCase();
+
+  if (
+    lower.includes("insufficient funds for gas * price + value") ||
+    lower.includes("insufficient funds")
+  ) {
+    const haveMatch = raw.match(/have\s+(\d+)/i);
+    const wantMatch = raw.match(/want\s+(\d+)/i);
+
+    if (haveMatch?.[1] && wantMatch?.[1]) {
+      const haveEth = formatWeiToEth(haveMatch[1]);
+      const wantEth = formatWeiToEth(wantMatch[1]);
+      return `Insufficient funds: wallet has ${haveEth} ETH but needs about ${wantEth} ETH (amount + gas).`;
+    }
+
+    return "Insufficient funds: wallet cannot cover amount plus gas.";
+  }
+
+  return raw || "Request failed";
+}
+
+function getApiKey(): string {
+  if (typeof window === "undefined") return "";
+  return localStorage.getItem("vencura_api_key") || "";
+}
+
+async function apiFetch(path: string, options: RequestInit = {}) {
+  const res = await fetch(`${API_BASE}${path}`, {
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": getApiKey(),
+      ...options.headers,
+    },
+  });
+
+  const data = await res.json();
+
+  if (!res.ok) {
+    throw new Error(normalizeApiErrorMessage(data.error || "Request failed"));
+  }
+
+  return data;
+}
+
+export const api = {
+  // Users
+  createUser: (email: string) =>
+    apiFetch("/users", { method: "POST", body: JSON.stringify({ email }) }),
+
+  getMe: () => apiFetch("/users/me"),
+  getUsers: () => apiFetch("/users"),
+
+  // Wallets
+  getWallets: () => apiFetch("/wallets"),
+
+  getWallet: (id: string) => apiFetch(`/wallets/${id}`),
+
+  createWallet: (name?: string) =>
+    apiFetch("/wallets", { method: "POST", body: JSON.stringify({ name }) }),
+
+  createWalletInGroup: (sourceWalletId: string, name?: string) =>
+    apiFetch(`/wallets/${sourceWalletId}/group-wallet`, {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    }),
+
+  // Wallet Groups
+  getWalletGroups: () => apiFetch("/wallet-groups"),
+  getWalletGroup: (id: string) => apiFetch(`/wallet-groups/${id}`),
+  createWalletGroup: (name?: string) =>
+    apiFetch("/wallet-groups", {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    }),
+  createWalletInWalletGroup: (walletGroupId: string, name?: string) =>
+    apiFetch(`/wallet-groups/${walletGroupId}/wallets`, {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    }),
+  syncWalletGroup: (walletGroupId: string) =>
+    apiFetch(`/wallet-groups/${walletGroupId}/sync`, {
+      method: "POST",
+    }),
+
+  updateWallet: (walletId: string, name: string) =>
+    apiFetch(`/wallets/${walletId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ name }),
+    }),
+
+  syncWallet: (walletId: string) =>
+    apiFetch(`/wallets/${walletId}/sync`, {
+      method: "POST",
+    }),
+
+  updateWalletGroup: (walletGroupId: string, name: string) =>
+    apiFetch(`/wallet-groups/${walletGroupId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ name }),
+    }),
+
+  shareWallet: (walletId: string, email: string) =>
+    apiFetch(`/wallets/${walletId}/share`, {
+      method: "POST",
+      body: JSON.stringify({ email }),
+    }),
+
+  // Signing
+  signMessage: (walletId: string, message: string) =>
+    apiFetch(`/wallets/${walletId}/sign`, {
+      method: "POST",
+      body: JSON.stringify({ message }),
+    }),
+
+  // Transactions
+  sendTransaction: (walletId: string, to: string, amount: string) =>
+    apiFetch(`/wallets/${walletId}/send`, {
+      method: "POST",
+      body: JSON.stringify({ to, amount }),
+    }),
+
+  sendTokenTransaction: (
+    walletId: string,
+    to: string,
+    tokenAddress: string,
+    amount: string
+  ) =>
+    apiFetch(`/wallets/${walletId}/send-token`, {
+      method: "POST",
+      body: JSON.stringify({ to, tokenAddress, amount }),
+    }),
+
+  internalTransfer: (walletId: string, toWalletId: string, amount: string) =>
+    apiFetch(`/wallets/${walletId}/transfer`, {
+      method: "POST",
+      body: JSON.stringify({ toWalletId, amount }),
+    }),
+
+  getTransactions: (walletId: string) =>
+    apiFetch(`/wallets/${walletId}/transactions`),
+
+  // Balance
+  getBalance: (addressOrId: string, asset?: string) =>
+    apiFetch(
+      asset
+        ? `/balance/${addressOrId}?asset=${encodeURIComponent(asset)}`
+        : `/balance/${addressOrId}`
+    ),
+};
