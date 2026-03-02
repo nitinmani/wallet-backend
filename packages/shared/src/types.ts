@@ -1,4 +1,3 @@
-export type WalletType = "STANDARD" | "GROUPED";
 export type TxType = "DEPOSIT" | "WITHDRAWAL" | "INTERNAL";
 export type TxStatus = "PENDING" | "BROADCASTING" | "CONFIRMED" | "FAILED";
 
@@ -13,7 +12,6 @@ export interface WalletResponse {
   id: string;
   name: string;
   address: string;
-  type: WalletType;
   walletGroupId: string | null;
   ownerId: string;
   balance: string;

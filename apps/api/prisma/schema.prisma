@@ -20,7 +20,9 @@ model User {
 model WalletGroup {
   id           String   @id @default(uuid())
   name         String   @default("Wallet Group")
+  address      String   @unique
   encryptedKey String
+  lastSyncBlock Int     @default(0)
   ownerId      String?
   owner        User?    @relation("WalletGroupOwner", fields: [ownerId], references: [id])
   wallets      Wallet[]
@@ -30,23 +32,14 @@ model WalletGroup {
 model Wallet {
   id            String         @id @default(uuid())
   name          String         @default("Default Wallet")
-  address       String?
-  encryptedKey  String?
-  type          WalletType     @default(STANDARD)
-  walletGroupId String?
-  walletGroup   WalletGroup?   @relation(fields: [walletGroupId], references: [id])
+  walletGroupId String
+  walletGroup   WalletGroup    @relation(fields: [walletGroupId], references: [id])
   ownerId       String
   owner         User           @relation("WalletOwner", fields: [ownerId], references: [id])
   accesses      WalletAccess[]
-  balance       String         @default("0")
+  assetBalances WalletAssetBalance[]
   transactions  Transaction[]
-  lastSyncBlock Int            @default(0)
   createdAt     DateTime       @default(now())
-}
-
-enum WalletType {
-  STANDARD
-  GROUPED
 }
 
 model WalletAccess {
@@ -77,6 +70,33 @@ model Transaction {
   gasPrice  String?
   status    TxStatus @default(PENDING)
   createdAt DateTime @default(now())
+}
+
+model Asset {
+  id              String              @id @default(uuid())
+  chainId         Int
+  type            AssetType           @default(NATIVE)
+  symbol          String
+  decimals        Int
+  contractAddress String?
+  balances        WalletAssetBalance[]
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+
+  @@unique([chainId, contractAddress])
+}
+
+model WalletAssetBalance {
+  id         String   @id @default(uuid())
+  walletId   String
+  wallet     Wallet   @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  assetId    String
+  asset      Asset    @relation(fields: [assetId], references: [id], onDelete: Cascade)
+  balance    String   @default("0")
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([walletId, assetId])
 }
 
 enum TxType {

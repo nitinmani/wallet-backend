@@ -88,11 +88,6 @@ export const api = {
   // Wallet Groups
   getWalletGroups: () => apiFetch("/wallet-groups"),
   getWalletGroup: (id: string) => apiFetch(`/wallet-groups/${id}`),
-  createWalletGroup: (name?: string) =>
-    apiFetch("/wallet-groups", {
-      method: "POST",
-      body: JSON.stringify({ name }),
-    }),
   createWalletInWalletGroup: (walletGroupId: string, name?: string) =>
     apiFetch(`/wallet-groups/${walletGroupId}/wallets`, {
       method: "POST",
@@ -134,22 +129,22 @@ export const api = {
     }),
 
   // Transactions
-  sendTransaction: (walletId: string, to: string, amount: string) =>
-    apiFetch(`/wallets/${walletId}/send`, {
-      method: "POST",
-      body: JSON.stringify({ to, amount }),
-    }),
-
-  sendTokenTransaction: (
+  sendTransaction: (
     walletId: string,
     to: string,
-    tokenAddress: string,
-    amount: string
+    amount: string,
+    assetId?: string
   ) =>
-    apiFetch(`/wallets/${walletId}/send-token`, {
+    apiFetch(`/wallets/${walletId}/send`, {
       method: "POST",
-      body: JSON.stringify({ to, tokenAddress, amount }),
+      body: JSON.stringify({ to, amount, assetId }),
     }),
+  getMaxSendAmount: (walletId: string, assetId: string, to?: string) =>
+    apiFetch(
+      `/wallets/${walletId}/send-max?assetId=${encodeURIComponent(assetId)}${
+        to ? `&to=${encodeURIComponent(to)}` : ""
+      }`
+    ),
 
   internalTransfer: (walletId: string, toWalletId: string, amount: string) =>
     apiFetch(`/wallets/${walletId}/transfer`, {
@@ -160,7 +155,36 @@ export const api = {
   getTransactions: (walletId: string) =>
     apiFetch(`/wallets/${walletId}/transactions`),
 
+  // Generic contract interactions
+  readContract: (
+    contractAddress: string,
+    abi: unknown[],
+    method: string,
+    args: unknown[] = [],
+    blockTag?: string | number
+  ) =>
+    apiFetch("/contracts/read", {
+      method: "POST",
+      body: JSON.stringify({ contractAddress, abi, method, args, blockTag }),
+    }),
+
+  writeContract: (
+    walletId: string,
+    contractAddress: string,
+    abi: unknown[],
+    method: string,
+    args: unknown[] = [],
+    value?: string,
+    gasPrice?: string,
+    nonce?: number
+  ) =>
+    apiFetch(`/contracts/${walletId}/write`, {
+      method: "POST",
+      body: JSON.stringify({ contractAddress, abi, method, args, value, gasPrice, nonce }),
+    }),
+
   // Balance
+  getWalletAssets: (walletId: string) => apiFetch(`/balance/wallet/${walletId}/assets`),
   getBalance: (addressOrId: string, asset?: string) =>
     apiFetch(
       asset

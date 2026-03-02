@@ -8,7 +8,6 @@ interface Wallet {
   id: string;
   name: string;
   address: string;
-  type: string;
   balance: string;
   walletGroupId: string | null;
   walletGroup?: {
@@ -24,11 +23,6 @@ interface WalletGroup {
   ownerId: string | null;
   wallets: Wallet[];
 }
-
-const typeBadge: Record<string, string> = {
-  STANDARD: "bg-blue-600",
-  GROUPED: "bg-emerald-600",
-};
 
 function formatBalance(wei: string): string {
   try {
@@ -55,9 +49,6 @@ export default function Dashboard() {
 
   const [creatingWallet, setCreatingWallet] = useState(false);
   const [walletName, setWalletName] = useState("");
-
-  const [creatingGroup, setCreatingGroup] = useState(false);
-  const [groupName, setGroupName] = useState("");
 
   async function loadDashboard() {
     try {
@@ -91,19 +82,6 @@ export default function Dashboard() {
     }
   }
 
-  async function handleCreateWalletGroup() {
-    setCreatingGroup(true);
-    try {
-      await api.createWalletGroup(groupName || undefined);
-      setGroupName("");
-      await loadDashboard();
-    } catch (err: any) {
-      alert(err.message);
-    } finally {
-      setCreatingGroup(false);
-    }
-  }
-
   if (loading) {
     return <p className="text-gray-400 mt-10">Loading...</p>;
   }
@@ -123,9 +101,13 @@ export default function Dashboard() {
         </button>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+      <div className="mb-8">
         <div className="p-4 bg-gray-900 border border-gray-800 rounded-lg">
           <h2 className="text-lg font-semibold mb-3">Create Wallet</h2>
+          <p className="text-xs text-gray-400 mb-3">
+            Each new wallet automatically creates its own wallet group. Add more wallets to that
+            group from the wallet group page.
+          </p>
           <div className="flex gap-3 items-end flex-wrap">
             <div>
               <label className="block text-xs text-gray-400 mb-1">Name (optional)</label>
@@ -143,29 +125,6 @@ export default function Dashboard() {
               className="px-4 py-2 bg-blue-600 hover:bg-blue-700 rounded-lg text-sm font-medium transition disabled:opacity-50"
             >
               {creatingWallet ? "Creating..." : "Create Wallet"}
-            </button>
-          </div>
-        </div>
-
-        <div className="p-4 bg-gray-900 border border-gray-800 rounded-lg">
-          <h2 className="text-lg font-semibold mb-3">Create Wallet Group</h2>
-          <div className="flex gap-3 items-end flex-wrap">
-            <div>
-              <label className="block text-xs text-gray-400 mb-1">Group Name (optional)</label>
-              <input
-                type="text"
-                value={groupName}
-                onChange={(e) => setGroupName(e.target.value)}
-                placeholder="Treasury Group"
-                className="px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm focus:outline-none focus:border-emerald-500"
-              />
-            </div>
-            <button
-              onClick={handleCreateWalletGroup}
-              disabled={creatingGroup}
-              className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 rounded-lg text-sm font-medium transition disabled:opacity-50"
-            >
-              {creatingGroup ? "Creating..." : "Create Group"}
             </button>
           </div>
         </div>
@@ -212,11 +171,6 @@ export default function Dashboard() {
               >
                 <div className="flex items-center justify-between mb-2">
                   <h3 className="font-semibold">{w.name}</h3>
-                  <span
-                    className={`text-xs px-2 py-0.5 rounded-full text-white ${typeBadge[w.type]}`}
-                  >
-                    {w.type}
-                  </span>
                 </div>
                 <a
                   href={getSepoliaAddressUrl(w.address)}

@@ -8,7 +8,6 @@ interface Wallet {
   id: string;
   name: string;
   address: string;
-  type: string;
   balance: string;
   ownerId: string;
   walletGroupId: string | null;
@@ -57,6 +56,16 @@ interface TokenBalance {
   balance: string;
   formatted: string;
   error?: string;
+}
+
+interface WalletAsset {
+  assetId: string;
+  type: "NATIVE" | "ERC20";
+  symbol: string;
+  decimals: number;
+  contractAddress: string | null;
+  balance: string;
+  formatted: string;
 }
 
 const statusColor: Record<string, string> = {
@@ -138,6 +147,18 @@ function isLikelyEthAddress(value: string): boolean {
   return /^0x[a-fA-F0-9]{40}$/.test(value.trim());
 }
 
+function parseJsonArrayInput(rawValue: string, fieldName: string): unknown[] {
+  try {
+    const parsed = JSON.parse(rawValue);
+    if (!Array.isArray(parsed)) {
+      throw new Error();
+    }
+    return parsed;
+  } catch {
+    throw new Error(`${fieldName} must be a valid JSON array`);
+  }
+}
+
 export default function WalletDetail() {
   const params = useParams();
   const router = useRouter();
@@ -152,11 +173,10 @@ export default function WalletDetail() {
 
   const [sendTo, setSendTo] = useState("");
   const [sendAmount, setSendAmount] = useState("");
+  const [selectedSendAssetId, setSelectedSendAssetId] = useState("");
   const [sendResult, setSendResult] = useState("");
-  const [sendTokenTo, setSendTokenTo] = useState("");
-  const [sendTokenAddress, setSendTokenAddress] = useState("");
-  const [sendTokenAmount, setSendTokenAmount] = useState("");
-  const [sendTokenResult, setSendTokenResult] = useState("");
+  const [sendMaxHint, setSendMaxHint] = useState("");
+  const [sendingMax, setSendingMax] = useState(false);
 
   const [transferTo, setTransferTo] = useState("");
   const [transferAmount, setTransferAmount] = useState("");
@@ -170,8 +190,24 @@ export default function WalletDetail() {
   const [syncing, setSyncing] = useState(false);
   const [trackedTokenAddresses, setTrackedTokenAddresses] = useState<string[]>([]);
   const [tokenBalances, setTokenBalances] = useState<TokenBalance[]>([]);
+  const [walletAssets, setWalletAssets] = useState<WalletAsset[]>([]);
   const [tokenAddressToTrack, setTokenAddressToTrack] = useState("");
   const [tokenBalancesLoading, setTokenBalancesLoading] = useState(false);
+  const [readContractAddress, setReadContractAddress] = useState("");
+  const [readAbi, setReadAbi] = useState(`["function symbol() view returns (string)"]`);
+  const [readMethod, setReadMethod] = useState("symbol");
+  const [readArgs, setReadArgs] = useState("[]");
+  const [readResult, setReadResult] = useState("");
+  const [readingContract, setReadingContract] = useState(false);
+  const [writeContractAddress, setWriteContractAddress] = useState("");
+  const [writeAbi, setWriteAbi] = useState(
+    `["function transfer(address to, uint256 amount) returns (bool)"]`
+  );
+  const [writeMethod, setWriteMethod] = useState("transfer");
+  const [writeArgs, setWriteArgs] = useState("[]");
+  const [writeValueEth, setWriteValueEth] = useState("");
+  const [writeResult, setWriteResult] = useState("");
+  const [writingContract, setWritingContract] = useState(false);
 
   const [error, setError] = useState("");
 
@@ -212,14 +248,23 @@ export default function WalletDetail() {
 
   async function load() {
     try {
-      const [w, txs, userList] = await Promise.all([
+      const [w, txs, userList, assets] = await Promise.all([
         api.getWallet(walletId),
         api.getTransactions(walletId),
         api.getUsers(),
+        api.getWalletAssets(walletId),
       ]);
       setWallet(w);
       setTransactions(txs);
       setUsers(userList);
+      setWalletAssets(assets);
+      setSelectedSendAssetId((prev) => {
+        if (assets.some((asset: WalletAsset) => asset.assetId === prev)) {
+          return prev;
+        }
+        const native = assets.find((asset: WalletAsset) => asset.type === "NATIVE");
+        return native?.assetId || assets[0]?.assetId || "";
+      });
 
       if (w.walletGroupId) {
         const group = await api.getWalletGroup(w.walletGroupId);
@@ -272,8 +317,18 @@ export default function WalletDetail() {
   async function handleSend() {
     setError("");
     setSendResult("");
+    setSendMaxHint("");
+    if (!selectedSendAssetId) {
+      setError("Select an asset to send");
+      return;
+    }
     try {
-      const result = await api.sendTransaction(walletId, sendTo, sendAmount);
+      const result = await api.sendTransaction(
+        walletId,
+        sendTo,
+        sendAmount,
+        selectedSendAssetId
+      );
       setSendResult(result.txHash);
       await load();
     } catch (err: any) {
@@ -281,20 +336,32 @@ export default function WalletDetail() {
     }
   }
 
-  async function handleSendToken() {
+  async function handleSendMax() {
     setError("");
-    setSendTokenResult("");
+    setSendMaxHint("");
+    if (!selectedSendAssetId) {
+      setError("Select an asset to send");
+      return;
+    }
+    setSendingMax(true);
     try {
-      const result = await api.sendTokenTransaction(
+      const result = await api.getMaxSendAmount(
         walletId,
-        sendTokenTo,
-        sendTokenAddress,
-        sendTokenAmount
+        selectedSendAssetId,
+        sendTo || undefined
       );
-      setSendTokenResult(result.txHash);
-      await load();
+      setSendAmount(result.formattedMax);
+      if (result.assetType === "NATIVE") {
+        setSendMaxHint(
+          `Max ${result.symbol}: ${result.formattedMax} (estimated gas ${result.estimatedGasFeeFormatted} ETH)`
+        );
+      } else {
+        setSendMaxHint(`Max ${result.symbol}: ${result.formattedMax}`);
+      }
     } catch (err: any) {
       setError(err.message);
+    } finally {
+      setSendingMax(false);
     }
   }
 
@@ -365,12 +432,72 @@ export default function WalletDetail() {
     await refreshTokenBalances(walletId, mergedTokens);
   }
 
+  async function handleContractRead() {
+    setError("");
+    setReadResult("");
+    setReadingContract(true);
+    try {
+      if (!isLikelyEthAddress(readContractAddress)) {
+        throw new Error("Enter a valid contract address");
+      }
+      const method = readMethod.trim();
+      if (!method) {
+        throw new Error("Method is required");
+      }
+
+      const abi = parseJsonArrayInput(readAbi, "ABI");
+      const args = parseJsonArrayInput(readArgs, "Args");
+
+      const result = await api.readContract(readContractAddress.trim(), abi, method, args);
+      setReadResult(JSON.stringify(result.result, null, 2));
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setReadingContract(false);
+    }
+  }
+
+  async function handleContractWrite() {
+    setError("");
+    setWriteResult("");
+    setWritingContract(true);
+    try {
+      if (!isLikelyEthAddress(writeContractAddress)) {
+        throw new Error("Enter a valid contract address");
+      }
+      const method = writeMethod.trim();
+      if (!method) {
+        throw new Error("Method is required");
+      }
+
+      const abi = parseJsonArrayInput(writeAbi, "ABI");
+      const args = parseJsonArrayInput(writeArgs, "Args");
+      const result = await api.writeContract(
+        walletId,
+        writeContractAddress.trim(),
+        abi,
+        method,
+        args,
+        writeValueEth.trim() || undefined
+      );
+
+      setWriteResult(result.txHash);
+      await load();
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setWritingContract(false);
+    }
+  }
+
   if (loading) return <p className="text-gray-400 mt-10">Loading...</p>;
   if (!wallet) return <p className="text-red-400 mt-10">Wallet not found</p>;
   const sharedEmails = new Set((wallet.accesses || []).map((access) => access.user.email));
   const shareableUsers = users.filter(
     (user) => user.id !== wallet.ownerId && !sharedEmails.has(user.email)
   );
+  const selectedSendAsset =
+    walletAssets.find((asset) => asset.assetId === selectedSendAssetId) || null;
 
   return (
     <div>
@@ -383,25 +510,14 @@ export default function WalletDetail() {
 
       <div className="p-6 bg-gray-900 border border-gray-800 rounded-lg mb-8">
         <div className="flex items-center justify-between gap-3 mb-4 flex-wrap">
-          <div className="flex items-center gap-3">
-            <h1 className="text-2xl font-bold">{wallet.name}</h1>
-            <span
-              className={`text-xs px-2 py-0.5 rounded-full text-white ${
-                wallet.type === "GROUPED" ? "bg-emerald-600" : "bg-blue-600"
-              }`}
-            >
-              {wallet.type}
-            </span>
-          </div>
-          {wallet.type === "STANDARD" && (
-            <button
-              onClick={handleManualSync}
-              disabled={syncing}
-              className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 rounded-lg text-xs font-medium transition disabled:opacity-50"
-            >
-              {syncing ? "Syncing..." : "Sync Now"}
-            </button>
-          )}
+          <h1 className="text-2xl font-bold">{wallet.name}</h1>
+          <button
+            onClick={handleManualSync}
+            disabled={syncing}
+            className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 rounded-lg text-xs font-medium transition disabled:opacity-50"
+          >
+            {syncing ? "Syncing..." : "Sync Now"}
+          </button>
         </div>
         <a
           href={getSepoliaAddressUrl(wallet.address)}
@@ -532,8 +648,7 @@ export default function WalletDetail() {
         </div>
 
         <div className="p-4 bg-gray-900 border border-gray-800 rounded-lg">
-          <h2 className="font-semibold mb-3">Send ETH</h2>
-          <p className="text-xs text-gray-500 mb-2">Native ETH has no contract address.</p>
+          <h2 className="font-semibold mb-3">Send Asset</h2>
           <input
             type="text"
             value={sendTo}
@@ -541,19 +656,58 @@ export default function WalletDetail() {
             placeholder="Recipient address (0x...)"
             className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm mb-2 focus:outline-none focus:border-blue-500"
           />
-          <input
-            type="text"
-            value={sendAmount}
-            onChange={(e) => setSendAmount(e.target.value)}
-            placeholder="Amount in ETH"
+          <select
+            value={selectedSendAssetId}
+            onChange={(e) => {
+              setSelectedSendAssetId(e.target.value);
+              setSendMaxHint("");
+            }}
             className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm mb-2 focus:outline-none focus:border-blue-500"
-          />
+          >
+            {walletAssets.length === 0 ? (
+              <option value="">No assets available</option>
+            ) : (
+              walletAssets.map((asset) => (
+                <option key={asset.assetId} value={asset.assetId}>
+                  {asset.symbol} ({asset.formatted})
+                </option>
+              ))
+            )}
+          </select>
+          {selectedSendAsset && (
+            <p className="text-xs text-gray-500 mb-2">
+              Available: {selectedSendAsset.formatted} {selectedSendAsset.symbol}
+            </p>
+          )}
+          <div className="flex gap-2 mb-2">
+            <input
+              type="text"
+              value={sendAmount}
+              onChange={(e) => setSendAmount(e.target.value)}
+              placeholder={
+                selectedSendAsset
+                  ? `Amount in ${selectedSendAsset.symbol}`
+                  : "Amount"
+              }
+              className="flex-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm focus:outline-none focus:border-blue-500"
+            />
+            <button
+              onClick={handleSendMax}
+              disabled={sendingMax || !selectedSendAssetId}
+              className="px-3 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-sm font-medium transition disabled:opacity-50"
+            >
+              {sendingMax ? "..." : "Send Max"}
+            </button>
+          </div>
           <button
             onClick={handleSend}
             className="px-4 py-2 bg-green-600 hover:bg-green-700 rounded-lg text-sm font-medium transition"
           >
             Send
           </button>
+          {sendMaxHint && (
+            <div className="mt-3 p-2 bg-gray-800 rounded text-xs text-gray-300">{sendMaxHint}</div>
+          )}
           {sendResult && (
             <div className="mt-3 p-2 bg-gray-800 rounded text-xs font-mono break-all">
               Tx Hash:{" "}
@@ -570,44 +724,107 @@ export default function WalletDetail() {
         </div>
 
         <div className="p-4 bg-gray-900 border border-gray-800 rounded-lg">
-          <h2 className="font-semibold mb-3">Send ERC-20 Token</h2>
+          <h2 className="font-semibold mb-3">Contract Read</h2>
+          <p className="text-xs text-gray-500 mb-2">View/pure calls only (no transaction).</p>
           <input
             type="text"
-            value={sendTokenTo}
-            onChange={(e) => setSendTokenTo(e.target.value)}
-            placeholder="Recipient address (0x...)"
+            value={readContractAddress}
+            onChange={(e) => setReadContractAddress(e.target.value)}
+            placeholder="Contract address (0x...)"
             className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm mb-2 focus:outline-none focus:border-blue-500"
           />
           <input
             type="text"
-            value={sendTokenAddress}
-            onChange={(e) => setSendTokenAddress(e.target.value)}
-            placeholder="Token contract address (e.g. USDC)"
+            value={readMethod}
+            onChange={(e) => setReadMethod(e.target.value)}
+            placeholder="Method (e.g. symbol)"
+            className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm mb-2 focus:outline-none focus:border-blue-500"
+          />
+          <textarea
+            value={readAbi}
+            onChange={(e) => setReadAbi(e.target.value)}
+            placeholder='ABI JSON array, e.g. ["function symbol() view returns (string)"]'
+            rows={3}
+            className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-xs font-mono mb-2 focus:outline-none focus:border-blue-500"
+          />
+          <textarea
+            value={readArgs}
+            onChange={(e) => setReadArgs(e.target.value)}
+            placeholder='Args JSON array, e.g. [] or ["0x..."]'
+            rows={2}
+            className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-xs font-mono mb-2 focus:outline-none focus:border-blue-500"
+          />
+          <button
+            onClick={handleContractRead}
+            disabled={readingContract}
+            className="px-4 py-2 bg-cyan-600 hover:bg-cyan-700 rounded-lg text-sm font-medium transition disabled:opacity-50"
+          >
+            {readingContract ? "Reading..." : "Read Contract"}
+          </button>
+          {readResult && (
+            <pre className="mt-3 p-2 bg-gray-800 rounded text-xs font-mono whitespace-pre-wrap break-all">
+              {readResult}
+            </pre>
+          )}
+        </div>
+
+        <div className="p-4 bg-gray-900 border border-gray-800 rounded-lg">
+          <h2 className="font-semibold mb-3">Contract Write</h2>
+          <p className="text-xs text-gray-500 mb-2">
+            Sends a signed transaction from this wallet.
+          </p>
+          <input
+            type="text"
+            value={writeContractAddress}
+            onChange={(e) => setWriteContractAddress(e.target.value)}
+            placeholder="Contract address (0x...)"
             className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm mb-2 focus:outline-none focus:border-blue-500"
           />
           <input
             type="text"
-            value={sendTokenAmount}
-            onChange={(e) => setSendTokenAmount(e.target.value)}
-            placeholder="Amount (token units)"
+            value={writeMethod}
+            onChange={(e) => setWriteMethod(e.target.value)}
+            placeholder="Method (e.g. transfer)"
+            className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm mb-2 focus:outline-none focus:border-blue-500"
+          />
+          <textarea
+            value={writeAbi}
+            onChange={(e) => setWriteAbi(e.target.value)}
+            placeholder='ABI JSON array, e.g. ["function transfer(address to, uint256 amount) returns (bool)"]'
+            rows={3}
+            className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-xs font-mono mb-2 focus:outline-none focus:border-blue-500"
+          />
+          <textarea
+            value={writeArgs}
+            onChange={(e) => setWriteArgs(e.target.value)}
+            placeholder='Args JSON array, e.g. ["0xRecipient", "1000000"]'
+            rows={2}
+            className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-xs font-mono mb-2 focus:outline-none focus:border-blue-500"
+          />
+          <input
+            type="text"
+            value={writeValueEth}
+            onChange={(e) => setWriteValueEth(e.target.value)}
+            placeholder="Optional native value in ETH (e.g. 0.01)"
             className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm mb-2 focus:outline-none focus:border-blue-500"
           />
           <button
-            onClick={handleSendToken}
-            className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 rounded-lg text-sm font-medium transition"
+            onClick={handleContractWrite}
+            disabled={writingContract}
+            className="px-4 py-2 bg-rose-600 hover:bg-rose-700 rounded-lg text-sm font-medium transition disabled:opacity-50"
           >
-            Send Token
+            {writingContract ? "Writing..." : "Write Contract"}
           </button>
-          {sendTokenResult && (
+          {writeResult && (
             <div className="mt-3 p-2 bg-gray-800 rounded text-xs font-mono break-all">
               Tx Hash:{" "}
               <a
-                href={getSepoliaTxUrl(sendTokenResult)}
+                href={getSepoliaTxUrl(writeResult)}
                 target="_blank"
                 rel="noreferrer"
                 className="text-blue-300 hover:text-blue-200 hover:underline"
               >
-                {sendTokenResult}
+                {writeResult}
               </a>
             </div>
           )}

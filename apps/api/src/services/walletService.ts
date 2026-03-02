@@ -1,54 +1,105 @@
-import { WalletType } from "@prisma/client";
 import { ethers } from "ethers";
 import { decrypt, encrypt } from "../lib/keyvault";
 import { prisma } from "../lib/prisma";
 import { provider } from "../lib/provider";
+import { ensureNativeAsset, setWalletAssetBalance } from "./assetService";
 
-export async function createWallet(
-  userId: string,
-  name?: string,
-  type: WalletType = "STANDARD"
-) {
-  const wallet = ethers.Wallet.createRandom();
-  const encryptedKey = encrypt(wallet.privateKey);
-  const lastSyncBlock =
-    type === "STANDARD" ? await provider.getBlockNumber() : 0;
-
-  return prisma.wallet.create({
-    data: {
-      name: name || "Default Wallet",
-      address: wallet.address,
-      encryptedKey,
-      type,
-      ownerId: userId,
-      lastSyncBlock,
-    },
+const walletInclude = {
+  walletGroup: true,
+  accesses: {
     include: {
-      walletGroup: true,
-      accesses: {
-        include: {
-          user: { select: { id: true, email: true } },
-        },
-      },
+      user: { select: { id: true, email: true } },
     },
+  },
+  assetBalances: {
+    include: { asset: true },
+    orderBy: { updatedAt: "desc" as const },
+  },
+};
+
+function getNativeBalanceFromWallet(wallet: any): string {
+  const native = (wallet.assetBalances || []).find(
+    (row: any) => row.asset?.type === "NATIVE" && !row.asset?.contractAddress
+  );
+  return native?.balance || "0";
+}
+
+function decorateWallet(wallet: any) {
+  return {
+    ...wallet,
+    address: wallet.walletGroup?.address || null,
+    balance: getNativeBalanceFromWallet(wallet),
+  };
+}
+
+function decorateWalletGroup(walletGroup: any) {
+  return {
+    ...walletGroup,
+    wallets: (walletGroup.wallets || []).map((wallet: any) => decorateWallet(wallet)),
+  };
+}
+
+async function createWalletRecordInGroup(
+  walletGroupId: string,
+  userId: string,
+  name?: string
+) {
+  return prisma.$transaction(async (tx) => {
+    const wallet = await tx.wallet.create({
+      data: {
+        name: name?.trim() || "Default Wallet",
+        walletGroupId,
+        ownerId: userId,
+      },
+      include: walletInclude,
+    });
+
+    const nativeAsset = await ensureNativeAsset(tx);
+    await setWalletAssetBalance(wallet.id, nativeAsset.id, 0n, tx);
+    return decorateWallet(wallet);
+  });
+}
+
+export async function createWallet(userId: string, name?: string) {
+  const signer = ethers.Wallet.createRandom();
+  const encryptedKey = encrypt(signer.privateKey);
+  const lastSyncBlock = await provider.getBlockNumber();
+
+  return prisma.$transaction(async (tx) => {
+    const walletGroup = await tx.walletGroup.create({
+      data: {
+        name: `${name?.trim() || "Wallet"} Group`,
+        address: signer.address,
+        encryptedKey,
+        ownerId: userId,
+        lastSyncBlock,
+      },
+    });
+
+    const wallet = await tx.wallet.create({
+      data: {
+        name: name?.trim() || "Default Wallet",
+        walletGroupId: walletGroup.id,
+        ownerId: userId,
+      },
+      include: walletInclude,
+    });
+
+    const nativeAsset = await ensureNativeAsset(tx);
+    await setWalletAssetBalance(wallet.id, nativeAsset.id, 0n, tx);
+    return decorateWallet(wallet);
   });
 }
 
 export async function getAccessibleWallet(walletId: string, userId: string) {
-  return prisma.wallet.findFirst({
+  const wallet = await prisma.wallet.findFirst({
     where: {
       id: walletId,
       OR: [{ ownerId: userId }, { accesses: { some: { userId } } }],
     },
-    include: {
-      walletGroup: true,
-      accesses: {
-        include: {
-          user: { select: { id: true, email: true } },
-        },
-      },
-    },
+    include: walletInclude,
   });
+  return wallet ? decorateWallet(wallet) : null;
 }
 
 export async function createWalletInWalletGroup(
@@ -56,95 +107,27 @@ export async function createWalletInWalletGroup(
   sourceWalletId: string,
   name?: string
 ) {
-  const currentBlock = await provider.getBlockNumber();
   const sourceWallet = await prisma.wallet.findFirst({
     where: { id: sourceWalletId, ownerId: userId },
-    include: { walletGroup: true },
+    select: { walletGroupId: true },
   });
 
   if (!sourceWallet) {
     throw new Error("Source wallet not found or does not belong to user");
   }
 
-  if (!sourceWallet.address) {
-    throw new Error("Source wallet has no address");
-  }
-
-  let walletGroupId = sourceWallet.walletGroupId;
-
-  if (!walletGroupId) {
-    if (!sourceWallet.encryptedKey) {
-      throw new Error("Source wallet has no private key");
-    }
-
-    const group = await prisma.walletGroup.create({
-      data: {
-        name: `${sourceWallet.name} Group`,
-        encryptedKey: sourceWallet.encryptedKey,
-        ownerId: userId,
-      },
-    });
-
-    walletGroupId = group.id;
-
-    await prisma.wallet.update({
-      where: { id: sourceWallet.id },
-      data: { walletGroupId, type: "GROUPED" },
-    });
-  }
-
-  return prisma.wallet.create({
-    data: {
-      name: name || "Grouped Wallet",
-      address: sourceWallet.address,
-      encryptedKey: null,
-      type: "GROUPED",
-      walletGroupId,
-      ownerId: userId,
-      balance: "0",
-      lastSyncBlock: currentBlock,
-    },
-    include: {
-      walletGroup: true,
-      accesses: {
-        include: {
-          user: { select: { id: true, email: true } },
-        },
-      },
-    },
-  });
-}
-
-export async function createWalletGroup(userId: string, name?: string) {
-  const signer = ethers.Wallet.createRandom();
-  const encryptedKey = encrypt(signer.privateKey);
-
-  return prisma.walletGroup.create({
-    data: {
-      name: name?.trim() || "Wallet Group",
-      encryptedKey,
-      ownerId: userId,
-    },
-    include: {
-      wallets: {
-        orderBy: { createdAt: "desc" },
-      },
-    },
-  });
+  return createWalletRecordInGroup(sourceWallet.walletGroupId, userId, name);
 }
 
 export async function getUserWalletGroups(userId: string) {
-  return prisma.walletGroup.findMany({
+  const walletGroups = await prisma.walletGroup.findMany({
     where: {
       OR: [
         { ownerId: userId },
         {
           wallets: {
             some: {
-              OR: [
-                { ownerId: userId },
-                { accesses: { some: { userId } } },
-              ],
+              OR: [{ ownerId: userId }, { accesses: { some: { userId } } }],
             },
           },
         },
@@ -152,54 +135,16 @@ export async function getUserWalletGroups(userId: string) {
     },
     include: {
       wallets: {
+        include: walletInclude,
         orderBy: { createdAt: "desc" },
       },
     },
     orderBy: { createdAt: "desc" },
   });
+  return walletGroups.map(decorateWalletGroup);
 }
 
 export async function getWalletGroupById(walletGroupId: string, userId: string) {
-  return prisma.walletGroup.findFirst({
-    where: {
-      id: walletGroupId,
-      OR: [
-        { ownerId: userId },
-        {
-          wallets: {
-            some: {
-              OR: [
-                { ownerId: userId },
-                { accesses: { some: { userId } } },
-              ],
-            },
-          },
-        },
-      ],
-    },
-    include: {
-      wallets: {
-        include: {
-          accesses: {
-            include: {
-              user: {
-                select: { id: true, email: true },
-              },
-            },
-          },
-        },
-        orderBy: { createdAt: "desc" },
-      },
-    },
-  });
-}
-
-export async function createWalletInExistingWalletGroup(
-  walletGroupId: string,
-  userId: string,
-  name?: string
-) {
-  const currentBlock = await provider.getBlockNumber();
   const walletGroup = await prisma.walletGroup.findFirst({
     where: {
       id: walletGroupId,
@@ -208,10 +153,36 @@ export async function createWalletInExistingWalletGroup(
         {
           wallets: {
             some: {
-              OR: [
-                { ownerId: userId },
-                { accesses: { some: { userId } } },
-              ],
+              OR: [{ ownerId: userId }, { accesses: { some: { userId } } }],
+            },
+          },
+        },
+      ],
+    },
+    include: {
+      wallets: {
+        include: walletInclude,
+        orderBy: { createdAt: "desc" },
+      },
+    },
+  });
+  return walletGroup ? decorateWalletGroup(walletGroup) : null;
+}
+
+export async function createWalletInExistingWalletGroup(
+  walletGroupId: string,
+  userId: string,
+  name?: string
+) {
+  const walletGroup = await prisma.walletGroup.findFirst({
+    where: {
+      id: walletGroupId,
+      OR: [
+        { ownerId: userId },
+        {
+          wallets: {
+            some: {
+              OR: [{ ownerId: userId }, { accesses: { some: { userId } } }],
             },
           },
         },
@@ -223,29 +194,7 @@ export async function createWalletInExistingWalletGroup(
     throw new Error("Wallet group not found");
   }
 
-  const privateKey = decrypt(walletGroup.encryptedKey);
-  const signer = new ethers.Wallet(privateKey);
-
-  return prisma.wallet.create({
-    data: {
-      name: name?.trim() || "Grouped Wallet",
-      address: signer.address,
-      encryptedKey: null,
-      type: "GROUPED",
-      walletGroupId,
-      ownerId: userId,
-      balance: "0",
-      lastSyncBlock: currentBlock,
-    },
-    include: {
-      walletGroup: true,
-      accesses: {
-        include: {
-          user: { select: { id: true, email: true } },
-        },
-      },
-    },
-  });
+  return createWalletRecordInGroup(walletGroupId, userId, name);
 }
 
 export async function shareWalletWithUser(
@@ -295,20 +244,14 @@ export async function shareWalletWithUser(
 }
 
 export async function getUserWallets(userId: string) {
-  return prisma.wallet.findMany({
+  const wallets = await prisma.wallet.findMany({
     where: {
       OR: [{ ownerId: userId }, { accesses: { some: { userId } } }],
     },
-    include: {
-      walletGroup: true,
-      accesses: {
-        include: {
-          user: { select: { id: true, email: true } },
-        },
-      },
-    },
+    include: walletInclude,
     orderBy: { createdAt: "desc" },
   });
+  return wallets.map(decorateWallet);
 }
 
 export async function getWalletById(userId: string, walletId: string) {
@@ -321,16 +264,10 @@ export async function getWalletSigningContext(walletId: string, userId: string) 
     throw new Error("Wallet not found");
   }
 
-  const encryptedKey = wallet.walletGroup?.encryptedKey || wallet.encryptedKey;
-  if (!encryptedKey) {
-    throw new Error("No encrypted key available for wallet");
-  }
-
+  const encryptedKey = wallet.walletGroup.encryptedKey;
   const privateKey = decrypt(encryptedKey);
   const signer = new ethers.Wallet(privateKey, provider);
-  const lockKey = wallet.walletGroupId
-    ? `wallet-group:${wallet.walletGroupId}`
-    : `wallet:${wallet.id}`;
+  const lockKey = `wallet-group:${wallet.walletGroupId}`;
 
   return { wallet, signer, lockKey };
 }
@@ -358,18 +295,12 @@ export async function updateWalletName(
     throw new Error("Wallet not found");
   }
 
-  return prisma.wallet.update({
+  const updated = await prisma.wallet.update({
     where: { id: walletId },
     data: { name: normalized },
-    include: {
-      walletGroup: true,
-      accesses: {
-        include: {
-          user: { select: { id: true, email: true } },
-        },
-      },
-    },
+    include: walletInclude,
   });
+  return decorateWallet(updated);
 }
 
 export async function updateWalletGroupName(

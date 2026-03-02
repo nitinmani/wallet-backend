@@ -7,6 +7,7 @@ import { walletRoutes } from "./routes/wallets";
 import { walletGroupRoutes } from "./routes/walletGroups";
 import { balanceRoutes } from "./routes/balance";
 import { transactionRoutes } from "./routes/transactions";
+import { contractRoutes } from "./routes/contracts";
 
 const app = express();
 
@@ -26,6 +27,7 @@ app.use("/api/wallets", authMiddleware, walletRoutes);
 app.use("/api/wallet-groups", authMiddleware, walletGroupRoutes);
 app.use("/api/balance", authMiddleware, balanceRoutes);
 app.use("/api/wallets", authMiddleware, transactionRoutes);
+app.use("/api/contracts", authMiddleware, contractRoutes);
 
 app.use(errorHandler);
 

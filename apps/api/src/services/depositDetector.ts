@@ -1,6 +1,12 @@
 import { ethers } from "ethers";
 import { provider } from "../lib/provider";
 import { prisma } from "../lib/prisma";
+import {
+  ensureErc20Asset,
+  ensureNativeAsset,
+  getWalletAssetBalance,
+  setWalletAssetBalance,
+} from "./assetService";
 import { getAccessibleWallet } from "./walletService";
 
 const MAX_BLOCKS_PER_WALLET_PER_RUN = 25;
@@ -19,7 +25,8 @@ type ChainTxLike = {
 
 type WalletSyncRecord = {
   id: string;
-  address: string | null;
+  walletGroupId: string;
+  address: string;
   lastSyncBlock: number;
 };
 
@@ -172,20 +179,10 @@ async function processWalletDeposits(
   tokenMetadataCache: Map<string, TokenMetadata>,
   options?: ProcessWalletDepositsOptions
 ) {
-  if (!wallet.address) {
-    return {
-      scannedFromBlock: null as number | null,
-      scannedToBlock: null as number | null,
-      scannedBlocks: 0,
-      depositsFound: 0,
-      depositedAmount: "0",
-    };
-  }
-
   // Legacy safety: never backfill from genesis in interview scope.
   if (wallet.lastSyncBlock <= 0) {
-    await prisma.wallet.update({
-      where: { id: wallet.id },
+    await prisma.walletGroup.update({
+      where: { id: wallet.walletGroupId },
       data: { lastSyncBlock: currentBlock },
     });
     return {
@@ -288,6 +285,21 @@ async function processWalletDeposits(
           status: "CONFIRMED",
         },
       });
+
+      if (options?.creditWalletBalance && tx.to) {
+        const tokenAsset = await ensureErc20Asset(
+          tx.to,
+          tokenMetadata.symbol,
+          tokenMetadata.decimals
+        );
+        const currentTokenBalance = await getWalletAssetBalance(wallet.id, tokenAsset.id);
+        await setWalletAssetBalance(
+          wallet.id,
+          tokenAsset.id,
+          currentTokenBalance + decodedTransfer.amount
+        );
+      }
+
       depositsFound += 1;
       console.log(
         `Token deposit detected: ${txHash} -> ${wallet.address} ${tokenMetadata.symbol}`
@@ -296,24 +308,15 @@ async function processWalletDeposits(
   }
 
   if (options?.creditWalletBalance && depositedAmount > 0n) {
-    const currentWallet = await prisma.wallet.findUnique({
-      where: { id: wallet.id },
-      select: { balance: true },
-    });
-    const currentBalance = currentWallet ? BigInt(currentWallet.balance) : 0n;
-    await prisma.wallet.update({
-      where: { id: wallet.id },
-      data: {
-        lastSyncBlock: toBlock,
-        balance: (currentBalance + depositedAmount).toString(),
-      },
-    });
-  } else {
-    await prisma.wallet.update({
-      where: { id: wallet.id },
-      data: { lastSyncBlock: toBlock },
-    });
+    const nativeAsset = await ensureNativeAsset();
+    const currentNative = await getWalletAssetBalance(wallet.id, nativeAsset.id);
+    await setWalletAssetBalance(wallet.id, nativeAsset.id, currentNative + depositedAmount);
   }
+
+  await prisma.walletGroup.update({
+    where: { id: wallet.walletGroupId },
+    data: { lastSyncBlock: toBlock },
+  });
 
   return {
     scannedFromBlock: fromBlock,
@@ -326,32 +329,22 @@ async function processWalletDeposits(
 
 export async function detectDeposits(): Promise<DepositDetectionSummary> {
   const startedAt = Date.now();
-  const standardWallets = await prisma.wallet.findMany({
-    where: { type: "STANDARD", address: { not: null } },
-    select: { id: true, address: true, lastSyncBlock: true },
-  });
-
   const walletGroups = await prisma.walletGroup.findMany({
-    where: {
-      wallets: {
-        some: { type: "GROUPED", address: { not: null } },
-      },
-    },
+    where: { wallets: { some: {} } },
     select: {
       id: true,
+      address: true,
+      lastSyncBlock: true,
       wallets: {
-        where: { type: "GROUPED", address: { not: null } },
         select: {
           id: true,
-          address: true,
-          lastSyncBlock: true,
           createdAt: true,
         },
       },
     },
   });
 
-  if (standardWallets.length === 0 && walletGroups.length === 0) {
+  if (walletGroups.length === 0) {
     return {
       currentBlock: await getFreshBlockNumber(),
       standardWalletsScanned: 0,
@@ -366,19 +359,7 @@ export async function detectDeposits(): Promise<DepositDetectionSummary> {
   const cache = new Map<number, ChainTxLike[]>();
   const tokenMetadataCache = new Map<string, TokenMetadata>();
   let depositsFound = 0;
-  let groupKeysScanned = 0;
-
-  for (const wallet of standardWallets) {
-    const result = await processWalletDeposits(
-      wallet,
-      currentBlock,
-      MAX_BLOCKS_PER_WALLET_PER_RUN,
-      cache,
-      tokenMetadataCache,
-      { creditWalletBalance: true }
-    );
-    depositsFound += result.depositsFound;
-  }
+  let standardWalletsScanned = 0;
 
   for (const group of walletGroups) {
     if (group.wallets.length === 0) continue;
@@ -387,11 +368,16 @@ export async function detectDeposits(): Promise<DepositDetectionSummary> {
       return wallet.createdAt < oldest.createdAt ? wallet : oldest;
     }, group.wallets[0]);
 
+    if (group.wallets.length === 1) {
+      standardWalletsScanned += 1;
+    }
+
     const result = await processWalletDeposits(
       {
         id: primaryWallet.id,
-        address: primaryWallet.address,
-        lastSyncBlock: primaryWallet.lastSyncBlock,
+        walletGroupId: group.id,
+        address: group.address,
+        lastSyncBlock: group.lastSyncBlock,
       },
       currentBlock,
       MAX_BLOCKS_PER_WALLET_PER_RUN,
@@ -399,14 +385,13 @@ export async function detectDeposits(): Promise<DepositDetectionSummary> {
       tokenMetadataCache,
       { creditWalletBalance: true }
     );
-    groupKeysScanned += 1;
     depositsFound += result.depositsFound;
   }
 
   return {
     currentBlock,
-    standardWalletsScanned: standardWallets.length,
-    groupKeysScanned,
+    standardWalletsScanned,
+    groupKeysScanned: walletGroups.length,
     depositsFound,
     blocksFetched: cache.size,
     durationMs: Date.now() - startedAt,
@@ -419,23 +404,21 @@ export async function detectDepositsForWallet(walletId: string, userId: string) 
     throw new Error("Wallet not found");
   }
 
-  if (wallet.type !== "STANDARD") {
-    throw new Error("Manual blockchain sync is only supported for standard wallets");
-  }
-
-  if (!wallet.address) {
-    throw new Error("Wallet has no address");
-  }
-
   const currentBlock = await getFreshBlockNumber();
   const cache = new Map<number, ChainTxLike[]>();
   const tokenMetadataCache = new Map<string, TokenMetadata>();
   const result = await processWalletDeposits(
-    { id: wallet.id, address: wallet.address, lastSyncBlock: wallet.lastSyncBlock },
+    {
+      id: wallet.id,
+      walletGroupId: wallet.walletGroupId,
+      address: wallet.walletGroup.address,
+      lastSyncBlock: wallet.walletGroup.lastSyncBlock,
+    },
     currentBlock,
     MAX_BLOCKS_PER_MANUAL_SYNC,
     cache,
-    tokenMetadataCache
+    tokenMetadataCache,
+    { creditWalletBalance: true }
   );
 
   return {
@@ -448,10 +431,6 @@ export async function detectDepositsForWallet(walletId: string, userId: string) 
 export async function detectDepositsForSharedKeyWallet(
   wallet: WalletSyncRecord
 ) {
-  if (!wallet.address) {
-    throw new Error("Wallet has no address");
-  }
-
   const currentBlock = await getFreshBlockNumber();
   const cache = new Map<number, ChainTxLike[]>();
   const tokenMetadataCache = new Map<string, TokenMetadata>();

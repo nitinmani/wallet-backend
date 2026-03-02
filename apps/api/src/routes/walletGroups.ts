@@ -1,7 +1,6 @@
 import { Request, Response, Router } from "express";
 import { syncWalletGroupOnChainState } from "../services/transactionService";
 import {
-  createWalletGroup,
   createWalletInExistingWalletGroup,
   getUserWalletGroups,
   getWalletGroupById,
@@ -9,15 +8,6 @@ import {
 } from "../services/walletService";
 
 export const walletGroupRoutes = Router();
-
-walletGroupRoutes.post("/", async (req: Request, res: Response) => {
-  try {
-    const walletGroup = await createWalletGroup(req.user!.id, req.body.name);
-    res.status(201).json(walletGroup);
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
-  }
-});
 
 walletGroupRoutes.get("/", async (req: Request, res: Response) => {
   try {

@@ -1,7 +1,8 @@
 import { Router, Request, Response } from "express";
 import {
+  getMaxSendAmount,
+  sendAssetTransaction,
   sendTransaction,
-  sendERC20Transaction,
   replaceByFee,
   internalTransfer,
   getWalletTransactions,
@@ -12,7 +13,7 @@ export const transactionRoutes = Router();
 // Send ETH
 transactionRoutes.post("/:walletId/send", async (req: Request, res: Response) => {
   try {
-    const { to, amount, gasPrice, nonce } = req.body;
+    const { to, amount, gasPrice, nonce, assetId } = req.body;
     if (!to || !amount) {
       res.status(400).json({ error: "to and amount are required" });
       return;
@@ -22,34 +23,45 @@ transactionRoutes.post("/:walletId/send", async (req: Request, res: Response) =>
     if (gasPrice) overrides.gasPrice = BigInt(gasPrice);
     if (nonce !== undefined) overrides.nonce = nonce;
 
-    const result = await sendTransaction(
-      req.params.walletId,
-      req.user!.id,
-      to,
-      amount,
-      Object.keys(overrides).length > 0 ? overrides : undefined
-    );
+    const normalizedOverrides =
+      Object.keys(overrides).length > 0 ? overrides : undefined;
+
+    const result = assetId
+      ? await sendAssetTransaction(
+          req.params.walletId,
+          req.user!.id,
+          to,
+          amount,
+          assetId,
+          normalizedOverrides
+        )
+      : await sendTransaction(
+          req.params.walletId,
+          req.user!.id,
+          to,
+          amount,
+          normalizedOverrides
+        );
     res.json(result);
   } catch (err: any) {
     res.status(400).json({ error: err.message });
   }
 });
 
-// Send ERC-20 tokens
-transactionRoutes.post("/:walletId/send-token", async (req: Request, res: Response) => {
+transactionRoutes.get("/:walletId/send-max", async (req: Request, res: Response) => {
   try {
-    const { to, tokenAddress, amount } = req.body;
-    if (!to || !tokenAddress || !amount) {
-      res.status(400).json({ error: "to, tokenAddress, and amount are required" });
+    const assetId = req.query.assetId;
+    const to = req.query.to;
+    if (typeof assetId !== "string" || !assetId.trim()) {
+      res.status(400).json({ error: "assetId is required" });
       return;
     }
 
-    const result = await sendERC20Transaction(
+    const result = await getMaxSendAmount(
       req.params.walletId,
       req.user!.id,
-      to,
-      tokenAddress,
-      amount
+      assetId,
+      typeof to === "string" ? to : undefined
     );
     res.json(result);
   } catch (err: any) {

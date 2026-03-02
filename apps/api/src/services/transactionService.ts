@@ -1,7 +1,14 @@
 import { ethers } from "ethers";
-import { withKeyMutex } from "../lib/keyMutex";
+import { Prisma } from "@prisma/client";
+import { withPgAdvisoryLock } from "../lib/pgLock";
 import { prisma } from "../lib/prisma";
 import { broadcastSignedTransaction, provider } from "../lib/provider";
+import {
+  ensureErc20Asset,
+  ensureNativeAsset,
+  getWalletAssetBalance,
+  setWalletAssetBalance,
+} from "./assetService";
 import {
   detectDepositsForSharedKeyWallet,
   detectDepositsForWallet,
@@ -51,6 +58,32 @@ function safeSubtract(balance: bigint, amount: bigint): bigint {
   return amount > balance ? 0n : balance - amount;
 }
 
+async function getNextNonce(
+  tx: Prisma.TransactionClient,
+  fromAddress: string
+): Promise<number> {
+  const chainPendingNonce = await provider.getTransactionCount(fromAddress, "pending");
+  const maxReserved = await tx.transaction.aggregate({
+    where: {
+      from: fromAddress,
+      status: {
+        in: ["PENDING", "BROADCASTING"],
+      },
+      nonce: {
+        not: null,
+      },
+    },
+    _max: { nonce: true },
+  });
+
+  const dbNextNonce =
+    maxReserved._max.nonce === null || maxReserved._max.nonce === undefined
+      ? chainPendingNonce
+      : maxReserved._max.nonce + 1;
+
+  return Math.max(chainPendingNonce, dbNextNonce);
+}
+
 export async function sendTransaction(
   walletId: string,
   userId: string,
@@ -65,7 +98,7 @@ export async function sendTransaction(
 
   const lockKey = getWalletLockKey(lockWallet.id, lockWallet.walletGroupId);
 
-  return withKeyMutex(lockKey, async () => {
+  const result = await withPgAdvisoryLock(lockKey, async (tx) => {
     const { wallet, signer } = await getWalletSigningContext(walletId, userId);
     const weiAmount = ethers.parseEther(amount);
 
@@ -86,16 +119,19 @@ export async function sendTransaction(
       );
     }
 
-    if (wallet.walletGroupId) {
-      const walletBalance = BigInt(wallet.balance);
-      if (weiAmount + gasCost > walletBalance) {
-        throw new Error(
-          getInsufficientBalanceMessage(weiAmount, gasCost, walletBalance)
-        );
-      }
+    const nativeAsset = await ensureNativeAsset(tx);
+    const walletNativeBalance = await getWalletAssetBalance(
+      wallet.id,
+      nativeAsset.id,
+      tx
+    );
+    if (weiAmount + gasCost > walletNativeBalance) {
+      throw new Error(
+        getInsufficientBalanceMessage(weiAmount, gasCost, walletNativeBalance)
+      );
     }
 
-    const txRecord = await prisma.transaction.create({
+    const txRecord = await tx.transaction.create({
       data: {
         walletId,
         type: "WITHDRAWAL",
@@ -110,8 +146,7 @@ export async function sendTransaction(
     try {
       const network = await provider.getNetwork();
       const nonce =
-        overrides?.nonce ??
-        (await provider.getTransactionCount(signer.address, "pending"));
+        overrides?.nonce ?? (await getNextNonce(tx, signer.address));
       const gasPrice = overrides?.gasPrice ?? effectiveGasPrice;
       const txParams: ethers.TransactionRequest = {
         to,
@@ -128,7 +163,7 @@ export async function sendTransaction(
       const signedTx = await signer.signTransaction(txParams);
       const txHash = await broadcastSignedTransaction(signedTx);
 
-      await prisma.transaction.update({
+      await tx.transaction.update({
         where: { id: txRecord.id },
         data: { txHash, nonce, status: "BROADCASTING" },
       });
@@ -140,13 +175,21 @@ export async function sendTransaction(
         status: "BROADCASTING" as const,
       };
     } catch (err: any) {
-      await prisma.transaction.update({
+      await tx.transaction.update({
         where: { id: txRecord.id },
         data: { status: "FAILED" },
       });
-      throw new Error(`Transaction failed: ${err.message}`);
+      return {
+        error: `Transaction failed: ${err.message}`,
+      } as const;
     }
   });
+
+  if ("error" in result) {
+    throw new Error(result.error);
+  }
+
+  return result;
 }
 
 export async function sendERC20Transaction(
@@ -164,7 +207,7 @@ export async function sendERC20Transaction(
 
   const lockKey = getWalletLockKey(lockWallet.id, lockWallet.walletGroupId);
 
-  return withKeyMutex(lockKey, async () => {
+  const result = await withPgAdvisoryLock(lockKey, async (tx) => {
     const { wallet, signer } = await getWalletSigningContext(walletId, userId);
     const token = new ethers.Contract(tokenAddress, ERC20_ABI, signer);
     const [decimals, symbol] = await Promise.all([token.decimals(), token.symbol()]);
@@ -195,18 +238,44 @@ export async function sendERC20Transaction(
       );
     }
 
-    if (wallet.walletGroupId) {
-      const walletBalance = BigInt(wallet.balance);
-      if (gasCost > walletBalance) {
-        throw new Error(
-          `Insufficient ETH for gas: need ${ethers.formatEther(
-            gasCost
-          )} ETH, have ${ethers.formatEther(walletBalance)} ETH`
-        );
-      }
+    const nativeAsset = await ensureNativeAsset(tx);
+    const walletNativeBalance = await getWalletAssetBalance(
+      wallet.id,
+      nativeAsset.id,
+      tx
+    );
+    if (gasCost > walletNativeBalance) {
+      throw new Error(
+        `Insufficient ETH for gas: need ${ethers.formatEther(
+          gasCost
+        )} ETH, have ${ethers.formatEther(walletNativeBalance)} ETH`
+      );
     }
 
-    const txRecord = await prisma.transaction.create({
+    const trackedTokenAsset = await tx.asset.findFirst({
+      where: {
+        contractAddress: ethers.getAddress(tokenAddress),
+      },
+    });
+    if (!trackedTokenAsset) {
+      throw new Error("Token not tracked for this wallet");
+    }
+
+    const walletTokenBalance = await getWalletAssetBalance(
+      wallet.id,
+      trackedTokenAsset.id,
+      tx
+    );
+    if (tokenAmount > walletTokenBalance) {
+      throw new Error(
+        `Insufficient token balance: need ${amount}, have ${ethers.formatUnits(
+          walletTokenBalance,
+          decimals
+        )}`
+      );
+    }
+
+    const txRecord = await tx.transaction.create({
       data: {
         walletId,
         type: "WITHDRAWAL",
@@ -224,9 +293,7 @@ export async function sendERC20Transaction(
 
     try {
       const network = await provider.getNetwork();
-      const nonce =
-        overrides?.nonce ??
-        (await provider.getTransactionCount(signer.address, "pending"));
+      const nonce = overrides?.nonce ?? (await getNextNonce(tx, signer.address));
       const gasPrice = overrides?.gasPrice ?? effectiveGasPrice;
       const data = token.interface.encodeFunctionData("transfer", [
         to,
@@ -249,7 +316,7 @@ export async function sendERC20Transaction(
       const signedTx = await signer.signTransaction(txParams);
       const txHash = await broadcastSignedTransaction(signedTx);
 
-      await prisma.transaction.update({
+      await tx.transaction.update({
         where: { id: txRecord.id },
         data: { txHash, nonce, status: "BROADCASTING" },
       });
@@ -261,13 +328,126 @@ export async function sendERC20Transaction(
         status: "BROADCASTING" as const,
       };
     } catch (err: any) {
-      await prisma.transaction.update({
+      await tx.transaction.update({
         where: { id: txRecord.id },
         data: { status: "FAILED" },
       });
-      throw new Error(`ERC20 transaction failed: ${err.message}`);
+      return {
+        error: `ERC20 transaction failed: ${err.message}`,
+      } as const;
     }
   });
+
+  if ("error" in result) {
+    throw new Error(result.error);
+  }
+
+  return result;
+}
+
+export async function sendAssetTransaction(
+  walletId: string,
+  userId: string,
+  to: string,
+  amount: string,
+  assetId: string,
+  overrides?: { gasPrice?: bigint; nonce?: number }
+) {
+  const wallet = await getAccessibleWallet(walletId, userId);
+  if (!wallet) {
+    throw new Error("Wallet not found");
+  }
+
+  const assetRow = await prisma.walletAssetBalance.findFirst({
+    where: { walletId, assetId },
+    include: { asset: true },
+  });
+
+  if (!assetRow) {
+    throw new Error("Asset not found in wallet");
+  }
+
+  if (assetRow.asset.type === "NATIVE") {
+    return sendTransaction(walletId, userId, to, amount, overrides);
+  }
+
+  const tokenAddress = assetRow.asset.contractAddress;
+  if (!tokenAddress) {
+    throw new Error("ERC20 asset is missing contract address");
+  }
+
+  return sendERC20Transaction(walletId, userId, to, tokenAddress, amount, overrides);
+}
+
+export async function getMaxSendAmount(
+  walletId: string,
+  userId: string,
+  assetId: string,
+  to?: string
+) {
+  const wallet = await getAccessibleWallet(walletId, userId);
+  if (!wallet) {
+    throw new Error("Wallet not found");
+  }
+
+  const assetRow = await prisma.walletAssetBalance.findFirst({
+    where: { walletId, assetId },
+    include: { asset: true },
+  });
+
+  if (!assetRow) {
+    throw new Error("Asset not found in wallet");
+  }
+
+  const assetBalance = BigInt(assetRow.balance);
+
+  if (assetRow.asset.type === "ERC20") {
+    return {
+      assetId: assetRow.assetId,
+      assetType: "ERC20" as const,
+      symbol: assetRow.asset.symbol,
+      decimals: assetRow.asset.decimals,
+      balance: assetRow.balance,
+      formattedBalance: ethers.formatUnits(assetBalance, assetRow.asset.decimals),
+      maxAmount: assetRow.balance,
+      formattedMax: ethers.formatUnits(assetBalance, assetRow.asset.decimals),
+      estimatedGasFee: "0",
+      estimatedGasFeeFormatted: "0",
+    };
+  }
+
+  const { signer } = await getWalletSigningContext(walletId, userId);
+  const recipient = to && ethers.isAddress(to) ? to : signer.address;
+
+  let gasLimit = 21_000n;
+  try {
+    gasLimit = await provider.estimateGas({
+      from: signer.address,
+      to: recipient,
+      value: 0n,
+    });
+  } catch {
+    // Fallback for estimate failures (e.g. contract recipient without payable fallback).
+    gasLimit = 21_000n;
+  }
+
+  const { gasCost } = await estimateGasCost(gasLimit);
+  const onchainBalance = await provider.getBalance(signer.address);
+  const spendableBalance = assetBalance < onchainBalance ? assetBalance : onchainBalance;
+  const maxAmount = spendableBalance > gasCost ? spendableBalance - gasCost : 0n;
+
+  return {
+    assetId: assetRow.assetId,
+    assetType: "NATIVE" as const,
+    symbol: assetRow.asset.symbol,
+    decimals: assetRow.asset.decimals,
+    balance: assetRow.balance,
+    formattedBalance: ethers.formatEther(assetBalance),
+    maxAmount: maxAmount.toString(),
+    formattedMax: ethers.formatEther(maxAmount),
+    estimatedGasFee: gasCost.toString(),
+    estimatedGasFeeFormatted: ethers.formatEther(gasCost),
+  };
 }
 
 export async function replaceByFee(
@@ -325,10 +505,11 @@ type BroadcastingTxRecord = {
   txHash: string | null;
   walletId: string;
   status: "BROADCASTING";
-  wallet: {
-    walletGroupId: string | null;
-    address: string | null;
-  };
+  assetType: "NATIVE" | "ERC20";
+  tokenAddress: string | null;
+  tokenDecimals: number | null;
+  assetSymbol: string;
+  amount: string;
 };
 
 async function reconcileBroadcastingRecord(
@@ -350,25 +531,21 @@ async function reconcileBroadcastingRecord(
   const value = chainTx?.value ?? 0n;
   const isSuccess = receipt.status === 1;
 
-  if (txRecord.wallet.walletGroupId) {
-    const current = await prisma.wallet.findUnique({
-      where: { id: txRecord.walletId },
-    });
-    if (current) {
-      const existingBalance = BigInt(current.balance);
-      const debit = gasCost + (isSuccess ? value : 0n);
-      const nextBalance = safeSubtract(existingBalance, debit);
-      await prisma.wallet.update({
-        where: { id: txRecord.walletId },
-        data: { balance: nextBalance.toString() },
-      });
-    }
-  } else if (txRecord.wallet.address) {
-    const refreshedBalance = await provider.getBalance(txRecord.wallet.address);
-    await prisma.wallet.update({
-      where: { id: txRecord.walletId },
-      data: { balance: refreshedBalance.toString() },
-    });
+  const nativeAsset = await ensureNativeAsset();
+  const currentNative = await getWalletAssetBalance(txRecord.walletId, nativeAsset.id);
+  const nativeDebit = gasCost + (txRecord.assetType === "NATIVE" && isSuccess ? value : 0n);
+  const nextNative = safeSubtract(currentNative, nativeDebit);
+  await setWalletAssetBalance(txRecord.walletId, nativeAsset.id, nextNative);
+
+  if (txRecord.assetType === "ERC20" && isSuccess && txRecord.tokenAddress) {
+    const tokenAsset = await ensureErc20Asset(
+      txRecord.tokenAddress,
+      txRecord.assetSymbol || "ERC20",
+      txRecord.tokenDecimals ?? 18
+    );
+    const currentToken = await getWalletAssetBalance(txRecord.walletId, tokenAsset.id);
+    const nextToken = safeSubtract(currentToken, BigInt(txRecord.amount));
+    await setWalletAssetBalance(txRecord.walletId, tokenAsset.id, nextToken);
   }
 
   await prisma.transaction.updateMany({
@@ -424,10 +601,6 @@ export async function reconcileBroadcastingTransactionsForWallet(
     throw new Error("Wallet not found");
   }
 
-  if (wallet.type !== "STANDARD") {
-    throw new Error("Manual blockchain sync is only supported for standard wallets");
-  }
-
   const broadcasting = await prisma.transaction.findMany({
     where: {
       walletId,
@@ -463,14 +636,6 @@ export async function syncWalletOnChainState(walletId: string, userId: string) {
     throw new Error("Wallet not found");
   }
 
-  if (wallet.type !== "STANDARD") {
-    throw new Error("Manual blockchain sync is only supported for standard wallets");
-  }
-
-  if (!wallet.address) {
-    throw new Error("Wallet has no address");
-  }
-
   const reconciledCount = await reconcileBroadcastingTransactionsForWallet(
     walletId,
     userId,
@@ -478,20 +643,7 @@ export async function syncWalletOnChainState(walletId: string, userId: string) {
   );
 
   const depositSync = await detectDepositsForWallet(walletId, userId);
-
-  const onchainBalance = await provider.getBalance(wallet.address);
-  const updatedWallet = await prisma.wallet.update({
-    where: { id: walletId },
-    data: { balance: onchainBalance.toString() },
-    include: {
-      walletGroup: true,
-      accesses: {
-        include: {
-          user: { select: { id: true, email: true } },
-        },
-      },
-    },
-  });
+  const updatedWallet = await getAccessibleWallet(walletId, userId);
 
   return {
     wallet: updatedWallet,
@@ -509,18 +661,24 @@ export async function syncWalletGroupOnChainState(
     throw new Error("Wallet group not found");
   }
 
-  const groupWallets = walletGroup.wallets.filter((wallet) => !!wallet.address);
+  const groupWallets = walletGroup.wallets;
   if (groupWallets.length === 0) {
-    throw new Error("Wallet group has no wallets with an address");
+    throw new Error("Wallet group has no wallets");
   }
 
-  const primaryWallet = groupWallets.reduce((oldest, wallet) => {
+  const primaryWallet = groupWallets.reduce(
+    (
+      oldest: (typeof groupWallets)[number],
+      wallet: (typeof groupWallets)[number]
+    ) => {
     return wallet.createdAt < oldest.createdAt ? wallet : oldest;
-  }, groupWallets[0]);
+    },
+    groupWallets[0]
+  );
 
   const lockKey = `wallet-group:${walletGroupId}`;
 
-  return withKeyMutex(lockKey, async () => {
+  return withPgAdvisoryLock(lockKey, async () => {
     const broadcasting = await prisma.transaction.findMany({
       where: {
         status: "BROADCASTING",
@@ -548,9 +706,10 @@ export async function syncWalletGroupOnChainState(
     }
 
     const depositSync = await detectDepositsForSharedKeyWallet({
+      walletGroupId,
       id: primaryWallet.id,
-      address: primaryWallet.address,
-      lastSyncBlock: primaryWallet.lastSyncBlock,
+      address: walletGroup.address,
+      lastSyncBlock: walletGroup.lastSyncBlock,
     });
 
     const refreshedWalletGroup = await getWalletGroupById(walletGroupId, userId);
@@ -591,7 +750,7 @@ export async function internalTransfer(
 
   const lockKey = getWalletLockKey(fromWallet.id, fromWallet.walletGroupId);
 
-  return withKeyMutex(lockKey, async () => {
+  return withPgAdvisoryLock(lockKey, async (tx) => {
     const freshFrom = await getAccessibleWallet(fromWalletId, userId);
     const freshTo = await getAccessibleWallet(toWalletId, userId);
     if (!freshFrom || !freshTo) {
@@ -599,46 +758,40 @@ export async function internalTransfer(
     }
 
     const weiAmount = ethers.parseEther(amount);
-    const fromBalance = BigInt(freshFrom.balance);
+    const nativeAsset = await ensureNativeAsset(tx);
+    const fromBalance = await getWalletAssetBalance(fromWalletId, nativeAsset.id, tx);
 
     if (fromBalance < weiAmount) {
       throw new Error("Insufficient balance in source wallet");
     }
 
-    const [debit, credit] = await prisma.$transaction([
-      prisma.transaction.create({
-        data: {
-          walletId: fromWalletId,
-          type: "WITHDRAWAL",
-          to: freshTo.address,
-          from: freshFrom.address,
-          amount: weiAmount.toString(),
-          txHash: null,
-          gasPrice: "0",
-          status: "CONFIRMED",
-        },
-      }),
-      prisma.transaction.create({
-        data: {
-          walletId: toWalletId,
-          type: "DEPOSIT",
-          to: freshTo.address,
-          from: freshFrom.address,
-          amount: weiAmount.toString(),
-          txHash: null,
-          gasPrice: "0",
-          status: "CONFIRMED",
-        },
-      }),
-      prisma.wallet.update({
-        where: { id: fromWalletId },
-        data: { balance: (fromBalance - weiAmount).toString() },
-      }),
-      prisma.wallet.update({
-        where: { id: toWalletId },
-        data: { balance: (BigInt(freshTo.balance) + weiAmount).toString() },
-      }),
-    ]);
+    const debit = await tx.transaction.create({
+      data: {
+        walletId: fromWalletId,
+        type: "WITHDRAWAL",
+        to: freshTo.address,
+        from: freshFrom.address,
+        amount: weiAmount.toString(),
+        txHash: null,
+        gasPrice: "0",
+        status: "CONFIRMED",
+      },
+    });
+    const credit = await tx.transaction.create({
+      data: {
+        walletId: toWalletId,
+        type: "DEPOSIT",
+        to: freshTo.address,
+        from: freshFrom.address,
+        amount: weiAmount.toString(),
+        txHash: null,
+        gasPrice: "0",
+        status: "CONFIRMED",
+      },
+    });
+    await setWalletAssetBalance(fromWalletId, nativeAsset.id, fromBalance - weiAmount, tx);
+    const toBalance = await getWalletAssetBalance(toWalletId, nativeAsset.id, tx);
+    await setWalletAssetBalance(toWalletId, nativeAsset.id, toBalance + weiAmount, tx);
 
     return { debitTxId: debit.id, creditTxId: credit.id };
   });
