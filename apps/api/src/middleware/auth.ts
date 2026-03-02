@@ -25,7 +25,14 @@ export async function authMiddleware(
     return;
   }
 
-  const user = await prisma.user.findUnique({ where: { apiKey } });
+  let user;
+  try {
+    user = await prisma.user.findUnique({ where: { apiKey } });
+  } catch (err) {
+    console.error("Auth middleware database error:", err);
+    res.status(503).json({ error: "Database unavailable. Please try again." });
+    return;
+  }
 
   if (!user) {
     res.status(401).json({ error: "Invalid API key" });

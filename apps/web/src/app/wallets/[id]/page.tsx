@@ -180,6 +180,7 @@ export default function WalletDetail() {
 
   const [transferTo, setTransferTo] = useState("");
   const [transferAmount, setTransferAmount] = useState("");
+  const [selectedTransferAssetId, setSelectedTransferAssetId] = useState("");
   const [transferResult, setTransferResult] = useState("");
 
   const [users, setUsers] = useState<UserOption[]>([]);
@@ -191,7 +192,6 @@ export default function WalletDetail() {
   const [trackedTokenAddresses, setTrackedTokenAddresses] = useState<string[]>([]);
   const [tokenBalances, setTokenBalances] = useState<TokenBalance[]>([]);
   const [walletAssets, setWalletAssets] = useState<WalletAsset[]>([]);
-  const [tokenAddressToTrack, setTokenAddressToTrack] = useState("");
   const [tokenBalancesLoading, setTokenBalancesLoading] = useState(false);
   const [readContractAddress, setReadContractAddress] = useState("");
   const [readAbi, setReadAbi] = useState(`["function symbol() view returns (string)"]`);
@@ -259,6 +259,13 @@ export default function WalletDetail() {
       setUsers(userList);
       setWalletAssets(assets);
       setSelectedSendAssetId((prev) => {
+        if (assets.some((asset: WalletAsset) => asset.assetId === prev)) {
+          return prev;
+        }
+        const native = assets.find((asset: WalletAsset) => asset.type === "NATIVE");
+        return native?.assetId || assets[0]?.assetId || "";
+      });
+      setSelectedTransferAssetId((prev) => {
         if (assets.some((asset: WalletAsset) => asset.assetId === prev)) {
           return prev;
         }
@@ -372,8 +379,17 @@ export default function WalletDetail() {
       setError("Select a destination wallet");
       return;
     }
+    if (!selectedTransferAssetId) {
+      setError("Select an asset to transfer");
+      return;
+    }
     try {
-      const result = await api.internalTransfer(walletId, transferTo, transferAmount);
+      const result = await api.internalTransfer(
+        walletId,
+        transferTo,
+        transferAmount,
+        selectedTransferAssetId
+      );
       setTransferResult(
         `Internal transfer complete. Withdrawal: ${result.debitTxId}, Deposit: ${result.creditTxId}`
       );
@@ -415,21 +431,6 @@ export default function WalletDetail() {
     } finally {
       setSyncing(false);
     }
-  }
-
-  async function handleTrackTokenBalance() {
-    setError("");
-    const tokenAddress = tokenAddressToTrack.trim();
-    if (!tokenAddress) return;
-    if (!isLikelyEthAddress(tokenAddress)) {
-      setError("Enter a valid ERC-20 contract address");
-      return;
-    }
-
-    const mergedTokens = mergeTokenAddresses(trackedTokenAddresses, [tokenAddress]);
-    setTrackedTokenAddresses(mergedTokens);
-    setTokenAddressToTrack("");
-    await refreshTokenBalances(walletId, mergedTokens);
   }
 
   async function handleContractRead() {
@@ -498,6 +499,8 @@ export default function WalletDetail() {
   );
   const selectedSendAsset =
     walletAssets.find((asset) => asset.assetId === selectedSendAssetId) || null;
+  const selectedTransferAsset =
+    walletAssets.find((asset) => asset.assetId === selectedTransferAssetId) || null;
 
   return (
     <div>
@@ -532,27 +535,10 @@ export default function WalletDetail() {
         </p>
         <div className="mt-4 p-3 bg-gray-800/50 border border-gray-700 rounded-lg">
           <p className="text-xs text-gray-400 mb-2">Tracked Token Balances</p>
-          <div className="flex flex-col sm:flex-row gap-2 mb-2">
-            <input
-              type="text"
-              value={tokenAddressToTrack}
-              onChange={(e) => setTokenAddressToTrack(e.target.value)}
-              placeholder="ERC-20 contract address (0x...)"
-              className="flex-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm focus:outline-none focus:border-blue-500"
-            />
-            <button
-              onClick={handleTrackTokenBalance}
-              className="px-3 py-2 bg-emerald-600 hover:bg-emerald-700 rounded-lg text-sm font-medium transition"
-            >
-              Add Token
-            </button>
-          </div>
           {tokenBalancesLoading ? (
             <p className="text-xs text-gray-500">Loading token balances...</p>
           ) : tokenBalances.length === 0 ? (
-            <p className="text-xs text-gray-500">
-              No ERC-20 balances tracked yet. Add a token contract or receive one first.
-            </p>
+            <p className="text-xs text-gray-500">No ERC-20 balances tracked yet.</p>
           ) : (
             <div className="space-y-2">
               {tokenBalances.map((tokenBalance) => (
@@ -660,6 +646,7 @@ export default function WalletDetail() {
             value={selectedSendAssetId}
             onChange={(e) => {
               setSelectedSendAssetId(e.target.value);
+              setSendAmount("");
               setSendMaxHint("");
             }}
             className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm mb-2 focus:outline-none focus:border-blue-500"
@@ -850,11 +837,33 @@ export default function WalletDetail() {
                 ))
               )}
             </select>
+            <select
+              value={selectedTransferAssetId}
+              onChange={(e) => {
+                setSelectedTransferAssetId(e.target.value);
+                setTransferAmount("");
+              }}
+              className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm mb-2 focus:outline-none focus:border-blue-500"
+            >
+              {walletAssets.length === 0 ? (
+                <option value="">No assets available</option>
+              ) : (
+                walletAssets.map((asset) => (
+                  <option key={asset.assetId} value={asset.assetId}>
+                    {asset.symbol} ({asset.formatted})
+                  </option>
+                ))
+              )}
+            </select>
             <input
               type="text"
               value={transferAmount}
               onChange={(e) => setTransferAmount(e.target.value)}
-              placeholder="Amount in ETH"
+              placeholder={
+                selectedTransferAsset
+                  ? `Amount in ${selectedTransferAsset.symbol}`
+                  : "Amount"
+              }
               className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm mb-2 focus:outline-none focus:border-blue-500"
             />
             <button

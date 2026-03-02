@@ -93,7 +93,7 @@ transactionRoutes.post("/:walletId/rbf", async (req: Request, res: Response) => 
 // Internal transfer between sub-wallets
 transactionRoutes.post("/:walletId/transfer", async (req: Request, res: Response) => {
   try {
-    const { toWalletId, amount } = req.body;
+    const { toWalletId, amount, assetId } = req.body;
     if (!toWalletId || !amount) {
       res.status(400).json({ error: "toWalletId and amount are required" });
       return;
@@ -103,7 +103,8 @@ transactionRoutes.post("/:walletId/transfer", async (req: Request, res: Response
       req.params.walletId,
       toWalletId,
       req.user!.id,
-      amount
+      amount,
+      assetId
     );
     res.json(result);
   } catch (err: any) {

@@ -54,10 +54,25 @@ async function apiFetch(path: string, options: RequestInit = {}) {
     },
   });
 
-  const data = await res.json();
+  const rawBody = await res.text();
+  let data: any = {};
+
+  if (rawBody) {
+    try {
+      data = JSON.parse(rawBody);
+    } catch {
+      data = { error: rawBody };
+    }
+  }
 
   if (!res.ok) {
-    throw new Error(normalizeApiErrorMessage(data.error || "Request failed"));
+    const message =
+      typeof data?.error === "string"
+        ? data.error
+        : typeof data?.message === "string"
+        ? data.message
+        : `Request failed (${res.status})`;
+    throw new Error(normalizeApiErrorMessage(message));
   }
 
   return data;
@@ -146,10 +161,15 @@ export const api = {
       }`
     ),
 
-  internalTransfer: (walletId: string, toWalletId: string, amount: string) =>
+  internalTransfer: (
+    walletId: string,
+    toWalletId: string,
+    amount: string,
+    assetId?: string
+  ) =>
     apiFetch(`/wallets/${walletId}/transfer`, {
       method: "POST",
-      body: JSON.stringify({ toWalletId, amount }),
+      body: JSON.stringify({ toWalletId, amount, assetId }),
     }),
 
   getTransactions: (walletId: string) =>

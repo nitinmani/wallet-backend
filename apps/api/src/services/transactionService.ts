@@ -727,7 +727,8 @@ export async function internalTransfer(
   fromWalletId: string,
   toWalletId: string,
   userId: string,
-  amount: string
+  amount: string,
+  assetId?: string
 ) {
   const fromWallet = await getAccessibleWallet(fromWalletId, userId);
   const toWallet = await getAccessibleWallet(toWalletId, userId);
@@ -757,13 +758,42 @@ export async function internalTransfer(
       throw new Error("Wallet access changed during transfer");
     }
 
-    const weiAmount = ethers.parseEther(amount);
     const nativeAsset = await ensureNativeAsset(tx);
-    const fromBalance = await getWalletAssetBalance(fromWalletId, nativeAsset.id, tx);
+    const selectedAsset = assetId
+      ? await tx.walletAssetBalance.findFirst({
+          where: { walletId: fromWalletId, assetId },
+          include: { asset: true },
+        })
+      : null;
 
-    if (fromBalance < weiAmount) {
+    if (assetId && !selectedAsset) {
+      throw new Error("Asset not found in source wallet");
+    }
+
+    const transferAsset = selectedAsset?.asset ?? nativeAsset;
+    const parsedAmount =
+      transferAsset.type === "NATIVE"
+        ? ethers.parseEther(amount)
+        : ethers.parseUnits(amount, transferAsset.decimals);
+    const fromBalance = await getWalletAssetBalance(
+      fromWalletId,
+      transferAsset.id,
+      tx
+    );
+
+    if (fromBalance < parsedAmount) {
       throw new Error("Insufficient balance in source wallet");
     }
+
+    const assetTxFields =
+      transferAsset.type === "ERC20"
+        ? {
+            assetType: "ERC20" as const,
+            assetSymbol: transferAsset.symbol,
+            tokenAddress: transferAsset.contractAddress,
+            tokenDecimals: transferAsset.decimals,
+          }
+        : {};
 
     const debit = await tx.transaction.create({
       data: {
@@ -771,10 +801,11 @@ export async function internalTransfer(
         type: "WITHDRAWAL",
         to: freshTo.address,
         from: freshFrom.address,
-        amount: weiAmount.toString(),
+        amount: parsedAmount.toString(),
         txHash: null,
         gasPrice: "0",
         status: "CONFIRMED",
+        ...assetTxFields,
       },
     });
     const credit = await tx.transaction.create({
@@ -783,15 +814,21 @@ export async function internalTransfer(
         type: "DEPOSIT",
         to: freshTo.address,
         from: freshFrom.address,
-        amount: weiAmount.toString(),
+        amount: parsedAmount.toString(),
         txHash: null,
         gasPrice: "0",
         status: "CONFIRMED",
+        ...assetTxFields,
       },
     });
-    await setWalletAssetBalance(fromWalletId, nativeAsset.id, fromBalance - weiAmount, tx);
-    const toBalance = await getWalletAssetBalance(toWalletId, nativeAsset.id, tx);
-    await setWalletAssetBalance(toWalletId, nativeAsset.id, toBalance + weiAmount, tx);
+    await setWalletAssetBalance(
+      fromWalletId,
+      transferAsset.id,
+      fromBalance - parsedAmount,
+      tx
+    );
+    const toBalance = await getWalletAssetBalance(toWalletId, transferAsset.id, tx);
+    await setWalletAssetBalance(toWalletId, transferAsset.id, toBalance + parsedAmount, tx);
 
     return { debitTxId: debit.id, creditTxId: credit.id };
   });
