@@ -1,4 +1,5 @@
 const API_BASE = "/api";
+export const CONNECTED_WALLET_TOKEN_KEY = "vencura_connected_wallet_token";
 
 function formatWeiToEth(wei: string): string {
   try {
@@ -44,6 +45,11 @@ function getApiKey(): string {
   return localStorage.getItem("vencura_api_key") || "";
 }
 
+function getConnectedWalletToken(): string {
+  if (typeof window === "undefined") return "";
+  return localStorage.getItem(CONNECTED_WALLET_TOKEN_KEY) || "";
+}
+
 async function apiFetch(path: string, options: RequestInit = {}) {
   const res = await fetch(`${API_BASE}${path}`, {
     ...options,
@@ -52,6 +58,45 @@ async function apiFetch(path: string, options: RequestInit = {}) {
       "x-api-key": getApiKey(),
       ...options.headers,
     },
+  });
+
+  const rawBody = await res.text();
+  let data: any = {};
+
+  if (rawBody) {
+    try {
+      data = JSON.parse(rawBody);
+    } catch {
+      data = { error: rawBody };
+    }
+  }
+
+  if (!res.ok) {
+    const message =
+      typeof data?.error === "string"
+        ? data.error
+        : typeof data?.message === "string"
+        ? data.message
+        : `Request failed (${res.status})`;
+    throw new Error(normalizeApiErrorMessage(message));
+  }
+
+  return data;
+}
+
+async function connectedWalletFetch(path: string, options: RequestInit = {}) {
+  const token = getConnectedWalletToken();
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    ...((options.headers as Record<string, string> | undefined) || {}),
+  };
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+
+  const res = await fetch(`${API_BASE}${path}`, {
+    ...options,
+    headers,
   });
 
   const rawBody = await res.text();
@@ -211,4 +256,43 @@ export const api = {
         ? `/balance/${addressOrId}?asset=${encodeURIComponent(asset)}`
         : `/balance/${addressOrId}`
     ),
+
+  // Non-custodial connected wallet
+  issueConnectedWalletChallenge: (address: string) =>
+    connectedWalletFetch("/connected-wallet/challenge", {
+      method: "POST",
+      body: JSON.stringify({ address }),
+    }),
+  verifyConnectedWalletChallenge: (address: string, signature: string) =>
+    connectedWalletFetch("/connected-wallet/verify", {
+      method: "POST",
+      body: JSON.stringify({ address, signature }),
+    }),
+  connectedWalletLogout: () =>
+    connectedWalletFetch("/connected-wallet/logout", {
+      method: "POST",
+    }),
+  connectedWalletGetMe: () => connectedWalletFetch("/connected-wallet/me"),
+  connectedWalletGetAssets: () => connectedWalletFetch("/connected-wallet/assets"),
+  connectedWalletGetTransactions: () =>
+    connectedWalletFetch("/connected-wallet/transactions"),
+  connectedWalletSync: () =>
+    connectedWalletFetch("/connected-wallet/sync", { method: "POST" }),
+  connectedWalletGetMaxSendAmount: (assetId: string, to?: string) =>
+    connectedWalletFetch(
+      `/connected-wallet/send-max?assetId=${encodeURIComponent(assetId)}${
+        to ? `&to=${encodeURIComponent(to)}` : ""
+      }`
+    ),
+  connectedWalletRegisterTx: (
+    txHash: string,
+    amount: string,
+    to?: string,
+    assetId?: string,
+    nonce?: number
+  ) =>
+    connectedWalletFetch("/connected-wallet/register-tx", {
+      method: "POST",
+      body: JSON.stringify({ txHash, amount, to, assetId, nonce }),
+    }),
 };

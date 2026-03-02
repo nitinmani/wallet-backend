@@ -2,7 +2,27 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { api } from "@/lib/api";
+import { api, CONNECTED_WALLET_TOKEN_KEY } from "@/lib/api";
+
+const SEPOLIA_CHAIN_ID_HEX = "0xaa36a7";
+
+async function ensureSepoliaNetwork(ethereum: any) {
+  const currentChainId = await ethereum.request({ method: "eth_chainId" });
+  if (typeof currentChainId === "string" && currentChainId.toLowerCase() === SEPOLIA_CHAIN_ID_HEX) {
+    return;
+  }
+
+  try {
+    await ethereum.request({
+      method: "wallet_switchEthereumChain",
+      params: [{ chainId: SEPOLIA_CHAIN_ID_HEX }],
+    });
+  } catch (err: any) {
+    throw new Error(
+      err?.message || "Please switch your wallet network to Ethereum Sepolia."
+    );
+  }
+}
 
 export default function Home() {
   const router = useRouter();
@@ -11,6 +31,7 @@ export default function Home() {
   const [showCreate, setShowCreate] = useState(false);
   const [error, setError] = useState("");
   const [createdKey, setCreatedKey] = useState("");
+  const [connectingWallet, setConnectingWallet] = useState(false);
 
   async function handleLogin(e: React.FormEvent) {
     e.preventDefault();
@@ -36,12 +57,65 @@ export default function Home() {
     }
   }
 
+  async function handleConnectWallet() {
+    setError("");
+    setConnectingWallet(true);
+    try {
+      const ethereum = (window as any).ethereum;
+      if (!ethereum) {
+        throw new Error("No injected wallet found. Install MetaMask and try again.");
+      }
+      await ensureSepoliaNetwork(ethereum);
+
+      const accounts = await ethereum.request({ method: "eth_requestAccounts" });
+      const address = Array.isArray(accounts) ? accounts[0] : undefined;
+      if (!address || typeof address !== "string") {
+        throw new Error("No wallet account available");
+      }
+
+      const challenge = await api.issueConnectedWalletChallenge(address);
+      const signature = await ethereum.request({
+        method: "personal_sign",
+        params: [challenge.message, address],
+      });
+
+      const verified = await api.verifyConnectedWalletChallenge(address, signature);
+      localStorage.setItem(CONNECTED_WALLET_TOKEN_KEY, verified.token);
+      localStorage.setItem("vencura_connected_wallet_address", verified.wallet.address);
+      router.push("/connected-wallet");
+    } catch (err: any) {
+      setError(err.message || "Failed to connect wallet");
+    } finally {
+      setConnectingWallet(false);
+    }
+  }
+
+  if (connectingWallet) {
+    return (
+      <div className="max-w-md mx-auto mt-28 text-center">
+        <h1 className="text-2xl font-bold mb-3">Connecting Metamask Wallet</h1>
+        <p className="text-gray-400 mb-6">
+          Please approve the network/account/signature prompts in MetaMask.
+        </p>
+        <div className="w-10 h-10 mx-auto rounded-full border-4 border-gray-700 border-t-emerald-500 animate-spin" />
+      </div>
+    );
+  }
+
   return (
     <div className="max-w-md mx-auto mt-20">
       <h1 className="text-3xl font-bold mb-2">Vencura Wallet</h1>
       <p className="text-gray-400 mb-8">
         Custodial wallet platform on Ethereum Sepolia
       </p>
+      <button
+        type="button"
+        onClick={handleConnectWallet}
+        disabled={connectingWallet}
+        className="w-full py-2 mb-6 bg-emerald-600 hover:bg-emerald-700 rounded-lg font-medium transition disabled:opacity-50"
+      >
+        Connect Metamask Wallet
+      </button>
 
       {!showCreate ? (
         <>

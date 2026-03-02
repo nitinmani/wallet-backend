@@ -53,6 +53,16 @@ function getWalletLockKey(walletId: string, walletGroupId: string | null) {
   return walletGroupId ? `wallet-group:${walletGroupId}` : `wallet:${walletId}`;
 }
 
+async function getNonCustodialWalletById(walletId: string) {
+  return prisma.wallet.findFirst({
+    where: {
+      id: walletId,
+      walletGroup: { custodyType: "NON_CUSTODIAL" },
+    },
+    include: { walletGroup: true },
+  });
+}
+
 function safeSubtract(balance: bigint, amount: bigint): bigint {
   if (amount <= 0n) return balance;
   return amount > balance ? 0n : balance - amount;
@@ -450,6 +460,184 @@ export async function getMaxSendAmount(
   };
 }
 
+export async function getMaxSendAmountForConnectedWallet(
+  walletId: string,
+  assetId: string,
+  to?: string
+) {
+  const wallet = await getNonCustodialWalletById(walletId);
+  if (!wallet) {
+    throw new Error("Connected wallet not found");
+  }
+
+  const assetRow = await prisma.walletAssetBalance.findFirst({
+    where: { walletId, assetId },
+    include: { asset: true },
+  });
+
+  if (!assetRow) {
+    throw new Error("Asset not found in wallet");
+  }
+
+  if (assetRow.asset.type === "ERC20") {
+    if (!assetRow.asset.contractAddress) {
+      throw new Error("ERC20 asset is missing contract address");
+    }
+    const token = new ethers.Contract(
+      assetRow.asset.contractAddress,
+      [
+        "function balanceOf(address owner) view returns (uint256)",
+      ],
+      provider
+    );
+    const chainTokenBalance = BigInt(
+      (await token.balanceOf(wallet.walletGroup.address)).toString()
+    );
+    await setWalletAssetBalance(walletId, assetRow.assetId, chainTokenBalance);
+
+    return {
+      assetId: assetRow.assetId,
+      assetType: "ERC20" as const,
+      symbol: assetRow.asset.symbol,
+      decimals: assetRow.asset.decimals,
+      balance: chainTokenBalance.toString(),
+      formattedBalance: ethers.formatUnits(chainTokenBalance, assetRow.asset.decimals),
+      maxAmount: chainTokenBalance.toString(),
+      formattedMax: ethers.formatUnits(chainTokenBalance, assetRow.asset.decimals),
+      estimatedGasFee: "0",
+      estimatedGasFeeFormatted: "0",
+    };
+  }
+
+  const chainNativeBalance = await provider.getBalance(wallet.walletGroup.address);
+  await setWalletAssetBalance(walletId, assetRow.assetId, chainNativeBalance);
+  const recipient = to && ethers.isAddress(to) ? to : wallet.walletGroup.address;
+
+  let gasLimit = 21_000n;
+  try {
+    gasLimit = await provider.estimateGas({
+      from: wallet.walletGroup.address,
+      to: recipient,
+      value: 0n,
+    });
+  } catch {
+    gasLimit = 21_000n;
+  }
+
+  const { gasCost } = await estimateGasCost(gasLimit);
+  const maxAmount = chainNativeBalance > gasCost ? chainNativeBalance - gasCost : 0n;
+
+  return {
+    assetId: assetRow.assetId,
+    assetType: "NATIVE" as const,
+    symbol: assetRow.asset.symbol,
+    decimals: assetRow.asset.decimals,
+    balance: chainNativeBalance.toString(),
+    formattedBalance: ethers.formatEther(chainNativeBalance),
+    maxAmount: maxAmount.toString(),
+    formattedMax: ethers.formatEther(maxAmount),
+    estimatedGasFee: gasCost.toString(),
+    estimatedGasFeeFormatted: ethers.formatEther(gasCost),
+  };
+}
+
+export async function registerConnectedWalletBroadcastTx(
+  walletId: string,
+  input: {
+    txHash: string;
+    to?: string;
+    amount: string;
+    assetId?: string;
+    nonce?: number;
+  }
+) {
+  const wallet = await getNonCustodialWalletById(walletId);
+  if (!wallet) {
+    throw new Error("Connected wallet not found");
+  }
+
+  if (!/^0x[a-fA-F0-9]{64}$/.test(input.txHash)) {
+    throw new Error("Invalid txHash");
+  }
+
+  if (!input.amount || typeof input.amount !== "string") {
+    throw new Error("amount is required");
+  }
+
+  const existingTx = await prisma.transaction.findFirst({
+    where: {
+      walletId,
+      txHash: input.txHash,
+    },
+  });
+  if (existingTx) {
+    return {
+      transactionId: existingTx.id,
+      txHash: existingTx.txHash,
+      status: existingTx.status,
+    };
+  }
+
+  let assetRow = input.assetId
+    ? await prisma.walletAssetBalance.findFirst({
+        where: { walletId, assetId: input.assetId },
+        include: { asset: true },
+      })
+    : null;
+
+  if (input.assetId && !assetRow) {
+    throw new Error("Asset not found in wallet");
+  }
+
+  if (!assetRow) {
+    const nativeAsset = await ensureNativeAsset();
+    await setWalletAssetBalance(walletId, nativeAsset.id, await getWalletAssetBalance(walletId, nativeAsset.id));
+    assetRow = await prisma.walletAssetBalance.findFirst({
+      where: { walletId, assetId: nativeAsset.id },
+      include: { asset: true },
+    });
+  }
+
+  if (!assetRow) {
+    throw new Error("Unable to initialize native asset for connected wallet");
+  }
+
+  const normalizedAddress = ethers.getAddress(wallet.walletGroup.address);
+  const chainTx = await provider.getTransaction(input.txHash);
+  if (chainTx?.from && ethers.getAddress(chainTx.from) !== normalizedAddress) {
+    throw new Error("Transaction sender does not match connected wallet");
+  }
+
+  const parsedAmount =
+    assetRow.asset.type === "NATIVE"
+      ? ethers.parseEther(input.amount)
+      : ethers.parseUnits(input.amount, assetRow.asset.decimals);
+
+  const txRecord = await prisma.transaction.create({
+    data: {
+      walletId,
+      type: "WITHDRAWAL",
+      assetType: assetRow.asset.type,
+      assetSymbol: assetRow.asset.symbol,
+      tokenAddress: assetRow.asset.contractAddress,
+      tokenDecimals: assetRow.asset.type === "ERC20" ? assetRow.asset.decimals : null,
+      to: chainTx?.to || input.to || null,
+      from: normalizedAddress,
+      amount: parsedAmount.toString(),
+      txHash: input.txHash,
+      nonce: input.nonce ?? chainTx?.nonce ?? null,
+      gasPrice: chainTx?.gasPrice?.toString() || "0",
+      status: "BROADCASTING",
+    },
+  });
+
+  return {
+    transactionId: txRecord.id,
+    txHash: txRecord.txHash,
+    status: txRecord.status,
+  };
+}
+
 export async function replaceByFee(
   walletId: string,
   userId: string,
@@ -601,6 +789,13 @@ export async function reconcileBroadcastingTransactionsForWallet(
     throw new Error("Wallet not found");
   }
 
+  return reconcileBroadcastingTransactionsForWalletId(walletId, limit);
+}
+
+async function reconcileBroadcastingTransactionsForWalletId(
+  walletId: string,
+  limit = 100
+) {
   const broadcasting = await prisma.transaction.findMany({
     where: {
       walletId,
@@ -647,6 +842,30 @@ export async function syncWalletOnChainState(walletId: string, userId: string) {
 
   return {
     wallet: updatedWallet,
+    reconciledCount,
+    depositSync,
+  };
+}
+
+export async function syncConnectedWalletOnChainState(walletId: string) {
+  const wallet = await getNonCustodialWalletById(walletId);
+  if (!wallet) {
+    throw new Error("Connected wallet not found");
+  }
+
+  const reconciledCount = await reconcileBroadcastingTransactionsForWalletId(
+    walletId,
+    200
+  );
+
+  const depositSync = await detectDepositsForSharedKeyWallet({
+    walletGroupId: wallet.walletGroupId,
+    id: wallet.id,
+    address: wallet.walletGroup.address,
+    lastSyncBlock: wallet.walletGroup.lastSyncBlock,
+  });
+
+  return {
     reconciledCount,
     depositSync,
   };
@@ -838,6 +1057,18 @@ export async function getWalletTransactions(walletId: string, userId: string) {
   const wallet = await getAccessibleWallet(walletId, userId);
   if (!wallet) {
     throw new Error("Wallet not found");
+  }
+
+  return prisma.transaction.findMany({
+    where: { walletId },
+    orderBy: { createdAt: "desc" },
+  });
+}
+
+export async function getConnectedWalletTransactions(walletId: string) {
+  const wallet = await getNonCustodialWalletById(walletId);
+  if (!wallet) {
+    throw new Error("Connected wallet not found");
   }
 
   return prisma.transaction.findMany({

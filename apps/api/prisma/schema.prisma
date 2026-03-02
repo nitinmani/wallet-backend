@@ -21,7 +21,8 @@ model WalletGroup {
   id           String   @id @default(uuid())
   name         String   @default("Wallet Group")
   address      String   @unique
-  encryptedKey String
+  encryptedKey String?
+  custodyType  CustodyType @default(CUSTODIAL)
   lastSyncBlock Int     @default(0)
   ownerId      String?
   owner        User?    @relation("WalletGroupOwner", fields: [ownerId], references: [id])
@@ -34,12 +35,36 @@ model Wallet {
   name          String         @default("Default Wallet")
   walletGroupId String
   walletGroup   WalletGroup    @relation(fields: [walletGroupId], references: [id])
-  ownerId       String
-  owner         User           @relation("WalletOwner", fields: [ownerId], references: [id])
+  ownerId       String?
+  owner         User?          @relation("WalletOwner", fields: [ownerId], references: [id])
   accesses      WalletAccess[]
+  sessions      ConnectedWalletSession[]
   assetBalances WalletAssetBalance[]
   transactions  Transaction[]
   createdAt     DateTime       @default(now())
+}
+
+model ConnectedWalletChallenge {
+  id        String   @id @default(uuid())
+  address   String
+  nonce     String
+  message   String
+  expiresAt DateTime
+  consumedAt DateTime?
+  createdAt DateTime @default(now())
+
+  @@index([address, expiresAt])
+}
+
+model ConnectedWalletSession {
+  id             String   @id @default(uuid())
+  walletId       String
+  wallet         Wallet   @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  tokenHash      String   @unique
+  lastActivityAt DateTime @default(now())
+  createdAt      DateTime @default(now())
+
+  @@index([walletId, lastActivityAt])
 }
 
 model WalletAccess {
@@ -115,4 +140,9 @@ enum TxStatus {
 enum AssetType {
   NATIVE
   ERC20
+}
+
+enum CustodyType {
+  CUSTODIAL
+  NON_CUSTODIAL
 }

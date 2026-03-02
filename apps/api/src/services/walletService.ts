@@ -193,6 +193,9 @@ export async function createWalletInExistingWalletGroup(
   if (!walletGroup) {
     throw new Error("Wallet group not found");
   }
+  if (walletGroup.custodyType !== "CUSTODIAL") {
+    throw new Error("Cannot add wallets to a non-custodial wallet group");
+  }
 
   return createWalletRecordInGroup(walletGroupId, userId, name);
 }
@@ -264,7 +267,14 @@ export async function getWalletSigningContext(walletId: string, userId: string) 
     throw new Error("Wallet not found");
   }
 
+  if (wallet.walletGroup.custodyType !== "CUSTODIAL") {
+    throw new Error("Server-side signing is not available for non-custodial wallets");
+  }
+
   const encryptedKey = wallet.walletGroup.encryptedKey;
+  if (!encryptedKey) {
+    throw new Error("Custodial wallet is missing encrypted key material");
+  }
   const privateKey = decrypt(encryptedKey);
   const signer = new ethers.Wallet(privateKey, provider);
   const lockKey = `wallet-group:${wallet.walletGroupId}`;
