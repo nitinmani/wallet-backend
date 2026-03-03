@@ -8,7 +8,6 @@ interface Wallet {
   id: string;
   name: string;
   address: string;
-  type: string;
   balance: string;
 }
 
@@ -40,8 +39,6 @@ export default function WalletGroupDetailPage() {
   const [walletName, setWalletName] = useState("");
   const [renaming, setRenaming] = useState(false);
   const [addingWallet, setAddingWallet] = useState(false);
-  const [syncing, setSyncing] = useState(false);
-  const [syncResult, setSyncResult] = useState("");
   const [error, setError] = useState("");
 
   async function loadWalletGroup() {
@@ -90,23 +87,6 @@ export default function WalletGroupDetailPage() {
     }
   }
 
-  async function handleSyncGroup() {
-    setSyncing(true);
-    setError("");
-    setSyncResult("");
-    try {
-      const result = await api.syncWalletGroup(walletGroupId);
-      setWalletGroup(result.walletGroup);
-      setSyncResult(
-        `Synced group. Reconciled ${result.reconciledCount} withdrawal(s), found ${result.depositSync.depositsFound} deposit(s). Credited wallet ${result.primaryWalletId}.`
-      );
-    } catch (err: any) {
-      setError(err.message);
-    } finally {
-      setSyncing(false);
-    }
-  }
-
   if (loading) return <p className="text-gray-400 mt-10">Loading...</p>;
   if (!walletGroup) return <p className="text-red-400 mt-10">Wallet group not found</p>;
 
@@ -120,16 +100,7 @@ export default function WalletGroupDetailPage() {
       </button>
 
       <div className="p-6 bg-gray-900 border border-emerald-900 rounded-lg mb-8">
-        <div className="flex items-center justify-between gap-3 mb-3 flex-wrap">
-          <h1 className="text-2xl font-bold">Wallet Group</h1>
-          <button
-            onClick={handleSyncGroup}
-            disabled={syncing}
-            className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 rounded-lg text-xs font-medium transition disabled:opacity-50"
-          >
-            {syncing ? "Syncing..." : "Sync Group"}
-          </button>
-        </div>
+        <h1 className="text-2xl font-bold mb-3">Wallet Group</h1>
         <div className="flex gap-2 items-end flex-wrap">
           <div>
             <label className="block text-xs text-gray-400 mb-1">Group Name</label>
@@ -155,12 +126,6 @@ export default function WalletGroupDetailPage() {
       {error && (
         <div className="p-3 mb-6 bg-red-900/30 border border-red-800 rounded-lg text-red-400 text-sm">
           {error}
-        </div>
-      )}
-
-      {syncResult && (
-        <div className="p-3 mb-6 bg-blue-900/30 border border-blue-800 rounded-lg text-blue-300 text-sm">
-          {syncResult}
         </div>
       )}
 

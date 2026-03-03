@@ -7,6 +7,8 @@ import { walletRoutes } from "./routes/wallets";
 import { walletGroupRoutes } from "./routes/walletGroups";
 import { balanceRoutes } from "./routes/balance";
 import { transactionRoutes } from "./routes/transactions";
+import { contractRoutes } from "./routes/contracts";
+import { connectedWalletRoutes } from "./routes/connectedWallet";
 
 const app = express();
 
@@ -20,12 +22,14 @@ app.get("/api/health", (_req, res) => {
 
 // Public routes
 app.use("/api/users", userRoutes);
+app.use("/api/connected-wallet", connectedWalletRoutes);
 
 // Protected routes
 app.use("/api/wallets", authMiddleware, walletRoutes);
 app.use("/api/wallet-groups", authMiddleware, walletGroupRoutes);
 app.use("/api/balance", authMiddleware, balanceRoutes);
 app.use("/api/wallets", authMiddleware, transactionRoutes);
+app.use("/api/contracts", authMiddleware, contractRoutes);
 
 app.use(errorHandler);
 

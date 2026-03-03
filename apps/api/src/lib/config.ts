@@ -12,6 +12,10 @@ export const config = {
   databaseUrl: process.env.DATABASE_URL!,
   encryptionKey: process.env.ENCRYPTION_KEY!,
   sepoliaRpcUrl: process.env.SEPOLIA_RPC_URL || "https://sepolia.infura.io/v3/b313741c98fd491090beaf064ce39973",
+  etherscanApiKey: process.env.ETHERSCAN_API_KEY || "",
+  etherscanBaseUrl:
+    process.env.ETHERSCAN_BASE_URL || "https://api.etherscan.io/v2/api",
+  etherscanChainId: process.env.ETHERSCAN_CHAIN_ID || "11155111",
   port: parseInt(process.env.PORT || "3001", 10),
 };
 

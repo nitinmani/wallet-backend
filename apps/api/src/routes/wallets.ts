@@ -1,6 +1,4 @@
 import { Request, Response, Router } from "express";
-import { withKeyMutex } from "../lib/keyMutex";
-import { syncWalletOnChainState } from "../services/transactionService";
 import {
   createWallet,
   createWalletInWalletGroup,
@@ -65,15 +63,6 @@ walletRoutes.patch("/:walletId", async (req: Request, res: Response) => {
   }
 });
 
-walletRoutes.post("/:walletId/sync", async (req: Request, res: Response) => {
-  try {
-    const result = await syncWalletOnChainState(req.params.walletId, req.user!.id);
-    res.json(result);
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
-  }
-});
-
 walletRoutes.get("/", async (req: Request, res: Response) => {
   try {
     const wallets = await getUserWallets(req.user!.id);
@@ -110,20 +99,13 @@ walletRoutes.post("/:walletId/sign", async (req: Request, res: Response) => {
       return;
     }
 
-    const lockKey = lockWallet.walletGroupId
-      ? `wallet-group:${lockWallet.walletGroupId}`
-      : `wallet:${lockWallet.id}`;
-
-    const result = await withKeyMutex(lockKey, async () => {
-      const { signer } = await getWalletSigningContext(req.params.walletId, req.user!.id);
-      const signature = await signer.signMessage(message);
-      return { signature, address: signer.address };
-    });
+    const { signer } = await getWalletSigningContext(req.params.walletId, req.user!.id);
+    const signature = await signer.signMessage(message);
 
     res.json({
-      signature: result.signature,
+      signature,
       message,
-      address: result.address,
+      address: signer.address,
     });
   } catch (err: any) {
     res.status(400).json({ error: err.message });

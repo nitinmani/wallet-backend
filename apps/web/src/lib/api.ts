@@ -1,4 +1,5 @@
 const API_BASE = "/api";
+export const CONNECTED_WALLET_TOKEN_KEY = "vencura_connected_wallet_token";
 
 function formatWeiToEth(wei: string): string {
   try {
@@ -44,6 +45,11 @@ function getApiKey(): string {
   return localStorage.getItem("vencura_api_key") || "";
 }
 
+function getConnectedWalletToken(): string {
+  if (typeof window === "undefined") return "";
+  return localStorage.getItem(CONNECTED_WALLET_TOKEN_KEY) || "";
+}
+
 async function apiFetch(path: string, options: RequestInit = {}) {
   const res = await fetch(`${API_BASE}${path}`, {
     ...options,
@@ -54,10 +60,64 @@ async function apiFetch(path: string, options: RequestInit = {}) {
     },
   });
 
-  const data = await res.json();
+  const rawBody = await res.text();
+  let data: any = {};
+
+  if (rawBody) {
+    try {
+      data = JSON.parse(rawBody);
+    } catch {
+      data = { error: rawBody };
+    }
+  }
 
   if (!res.ok) {
-    throw new Error(normalizeApiErrorMessage(data.error || "Request failed"));
+    const message =
+      typeof data?.error === "string"
+        ? data.error
+        : typeof data?.message === "string"
+        ? data.message
+        : `Request failed (${res.status})`;
+    throw new Error(normalizeApiErrorMessage(message));
+  }
+
+  return data;
+}
+
+async function connectedWalletFetch(path: string, options: RequestInit = {}) {
+  const token = getConnectedWalletToken();
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    ...((options.headers as Record<string, string> | undefined) || {}),
+  };
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
+  }
+
+  const res = await fetch(`${API_BASE}${path}`, {
+    ...options,
+    headers,
+  });
+
+  const rawBody = await res.text();
+  let data: any = {};
+
+  if (rawBody) {
+    try {
+      data = JSON.parse(rawBody);
+    } catch {
+      data = { error: rawBody };
+    }
+  }
+
+  if (!res.ok) {
+    const message =
+      typeof data?.error === "string"
+        ? data.error
+        : typeof data?.message === "string"
+        ? data.message
+        : `Request failed (${res.status})`;
+    throw new Error(normalizeApiErrorMessage(message));
   }
 
   return data;
@@ -88,30 +148,16 @@ export const api = {
   // Wallet Groups
   getWalletGroups: () => apiFetch("/wallet-groups"),
   getWalletGroup: (id: string) => apiFetch(`/wallet-groups/${id}`),
-  createWalletGroup: (name?: string) =>
-    apiFetch("/wallet-groups", {
-      method: "POST",
-      body: JSON.stringify({ name }),
-    }),
   createWalletInWalletGroup: (walletGroupId: string, name?: string) =>
     apiFetch(`/wallet-groups/${walletGroupId}/wallets`, {
       method: "POST",
       body: JSON.stringify({ name }),
-    }),
-  syncWalletGroup: (walletGroupId: string) =>
-    apiFetch(`/wallet-groups/${walletGroupId}/sync`, {
-      method: "POST",
     }),
 
   updateWallet: (walletId: string, name: string) =>
     apiFetch(`/wallets/${walletId}`, {
       method: "PATCH",
       body: JSON.stringify({ name }),
-    }),
-
-  syncWallet: (walletId: string) =>
-    apiFetch(`/wallets/${walletId}/sync`, {
-      method: "POST",
     }),
 
   updateWalletGroup: (walletGroupId: string, name: string) =>
@@ -134,37 +180,101 @@ export const api = {
     }),
 
   // Transactions
-  sendTransaction: (walletId: string, to: string, amount: string) =>
-    apiFetch(`/wallets/${walletId}/send`, {
-      method: "POST",
-      body: JSON.stringify({ to, amount }),
-    }),
-
-  sendTokenTransaction: (
+  sendTransaction: (
     walletId: string,
     to: string,
-    tokenAddress: string,
-    amount: string
+    amount: string,
+    assetId?: string
   ) =>
-    apiFetch(`/wallets/${walletId}/send-token`, {
+    apiFetch(`/wallets/${walletId}/send`, {
       method: "POST",
-      body: JSON.stringify({ to, tokenAddress, amount }),
+      body: JSON.stringify({ to, amount, assetId }),
     }),
+  getMaxSendAmount: (walletId: string, assetId: string, to?: string) =>
+    apiFetch(
+      `/wallets/${walletId}/send-max?assetId=${encodeURIComponent(assetId)}${
+        to ? `&to=${encodeURIComponent(to)}` : ""
+      }`
+    ),
 
-  internalTransfer: (walletId: string, toWalletId: string, amount: string) =>
+  internalTransfer: (
+    walletId: string,
+    toWalletId: string,
+    amount: string,
+    assetId?: string
+  ) =>
     apiFetch(`/wallets/${walletId}/transfer`, {
       method: "POST",
-      body: JSON.stringify({ toWalletId, amount }),
+      body: JSON.stringify({ toWalletId, amount, assetId }),
     }),
 
   getTransactions: (walletId: string) =>
     apiFetch(`/wallets/${walletId}/transactions`),
 
+  // Generic contract interactions
+  readContract: (
+    contractAddress: string,
+    abi: unknown[],
+    method: string,
+    args: unknown[] = [],
+    blockTag?: string | number
+  ) =>
+    apiFetch("/contracts/read", {
+      method: "POST",
+      body: JSON.stringify({ contractAddress, abi, method, args, blockTag }),
+    }),
+  getContractAbi: (contractAddress: string) =>
+    apiFetch(`/contracts/abi/${encodeURIComponent(contractAddress)}`),
+
+  writeContract: (
+    walletId: string,
+    contractAddress: string,
+    abi: unknown[],
+    method: string,
+    args: unknown[] = [],
+    value?: string,
+    gasPrice?: string,
+    nonce?: number
+  ) =>
+    apiFetch(`/contracts/${walletId}/write`, {
+      method: "POST",
+      body: JSON.stringify({ contractAddress, abi, method, args, value, gasPrice, nonce }),
+    }),
+
   // Balance
+  getWalletAssets: (walletId: string) => apiFetch(`/balance/wallet/${walletId}/assets`),
   getBalance: (addressOrId: string, asset?: string) =>
     apiFetch(
       asset
         ? `/balance/${addressOrId}?asset=${encodeURIComponent(asset)}`
         : `/balance/${addressOrId}`
+    ),
+
+  // Non-custodial connected wallet
+  issueConnectedWalletChallenge: (address: string) =>
+    connectedWalletFetch("/connected-wallet/challenge", {
+      method: "POST",
+      body: JSON.stringify({ address }),
+    }),
+  verifyConnectedWalletChallenge: (address: string, signature: string) =>
+    connectedWalletFetch("/connected-wallet/verify", {
+      method: "POST",
+      body: JSON.stringify({ address, signature }),
+    }),
+  connectedWalletLogout: () =>
+    connectedWalletFetch("/connected-wallet/logout", {
+      method: "POST",
+    }),
+  connectedWalletGetMe: () => connectedWalletFetch("/connected-wallet/me"),
+  connectedWalletGetAssets: () => connectedWalletFetch("/connected-wallet/assets"),
+  connectedWalletSync: () =>
+    connectedWalletFetch("/connected-wallet/sync", { method: "POST" }),
+  connectedWalletGetContractAbi: (contractAddress: string) =>
+    connectedWalletFetch(`/connected-wallet/abi/${encodeURIComponent(contractAddress)}`),
+  connectedWalletGetMaxSendAmount: (assetId: string, to?: string) =>
+    connectedWalletFetch(
+      `/connected-wallet/send-max?assetId=${encodeURIComponent(assetId)}${
+        to ? `&to=${encodeURIComponent(to)}` : ""
+      }`
     ),
 };

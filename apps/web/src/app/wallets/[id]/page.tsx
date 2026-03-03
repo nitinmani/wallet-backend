@@ -8,7 +8,6 @@ interface Wallet {
   id: string;
   name: string;
   address: string;
-  type: string;
   balance: string;
   ownerId: string;
   walletGroupId: string | null;
@@ -57,6 +56,16 @@ interface TokenBalance {
   balance: string;
   formatted: string;
   error?: string;
+}
+
+interface WalletAsset {
+  assetId: string;
+  type: "NATIVE" | "ERC20";
+  symbol: string;
+  decimals: number;
+  contractAddress: string | null;
+  balance: string;
+  formatted: string;
 }
 
 const statusColor: Record<string, string> = {
@@ -113,6 +122,14 @@ function truncateAddress(addr: string): string {
   return `${addr.slice(0, 6)}...${addr.slice(-4)}`;
 }
 
+function hasPositiveBalance(balance: string): boolean {
+  try {
+    return BigInt(balance) > BigInt(0);
+  } catch {
+    return false;
+  }
+}
+
 function mergeTokenAddresses(existing: string[], incoming: string[]): string[] {
   const seen = new Set<string>();
   const merged: string[] = [];
@@ -138,6 +155,89 @@ function isLikelyEthAddress(value: string): boolean {
   return /^0x[a-fA-F0-9]{40}$/.test(value.trim());
 }
 
+interface AbiInputParam {
+  name?: string;
+  type?: string;
+}
+
+interface AbiFunctionOption {
+  key: string;
+  label: string;
+  inputs: AbiInputParam[];
+}
+
+function parseAbiFunctionOptions(
+  abi: unknown[],
+  mode: "read" | "write"
+): AbiFunctionOption[] {
+  const options: AbiFunctionOption[] = [];
+
+  for (const entry of abi) {
+    if (!entry || typeof entry !== "object") continue;
+    const record = entry as Record<string, unknown>;
+    if (record.type !== "function" || typeof record.name !== "string") continue;
+
+    const stateMutability =
+      typeof record.stateMutability === "string" ? record.stateMutability : "nonpayable";
+    const isRead = stateMutability === "view" || stateMutability === "pure";
+    if (mode === "read" && !isRead) continue;
+    if (mode === "write" && isRead) continue;
+
+    const inputs = Array.isArray(record.inputs)
+      ? record.inputs
+          .filter((input) => input && typeof input === "object")
+          .map((input) => {
+            const typedInput = input as Record<string, unknown>;
+            return {
+              name: typeof typedInput.name === "string" ? typedInput.name : undefined,
+              type: typeof typedInput.type === "string" ? typedInput.type : undefined,
+            };
+          })
+      : [];
+
+    const signature = `${record.name}(${inputs
+      .map((input) => input.type || "unknown")
+      .join(",")})`;
+    const label = `${record.name}(${inputs
+      .map((input, index) => `${input.name || `arg${index + 1}`}: ${input.type || "unknown"}`)
+      .join(", ")})`;
+
+    options.push({ key: signature, label, inputs });
+  }
+
+  return options;
+}
+
+function toContractArgValue(raw: string, inputType?: string): unknown {
+  const normalizedType = (inputType || "").trim().toLowerCase();
+  const trimmed = raw.trim();
+
+  if (!normalizedType) return raw;
+
+  if (normalizedType.endsWith("[]") || normalizedType.startsWith("tuple")) {
+    try {
+      return JSON.parse(raw);
+    } catch {
+      throw new Error(`Argument (${inputType}) must be valid JSON`);
+    }
+  }
+
+  if (normalizedType === "bool") {
+    if (trimmed.toLowerCase() === "true") return true;
+    if (trimmed.toLowerCase() === "false") return false;
+    throw new Error("Boolean argument must be true or false");
+  }
+
+  if (normalizedType.startsWith("uint") || normalizedType.startsWith("int")) {
+    if (!trimmed) {
+      throw new Error(`Argument (${inputType}) cannot be empty`);
+    }
+    return trimmed;
+  }
+
+  return raw;
+}
+
 export default function WalletDetail() {
   const params = useParams();
   const router = useRouter();
@@ -152,26 +252,45 @@ export default function WalletDetail() {
 
   const [sendTo, setSendTo] = useState("");
   const [sendAmount, setSendAmount] = useState("");
+  const [selectedSendAssetId, setSelectedSendAssetId] = useState("");
   const [sendResult, setSendResult] = useState("");
-  const [sendTokenTo, setSendTokenTo] = useState("");
-  const [sendTokenAddress, setSendTokenAddress] = useState("");
-  const [sendTokenAmount, setSendTokenAmount] = useState("");
-  const [sendTokenResult, setSendTokenResult] = useState("");
+  const [sendMaxHint, setSendMaxHint] = useState("");
+  const [sendingMax, setSendingMax] = useState(false);
 
   const [transferTo, setTransferTo] = useState("");
   const [transferAmount, setTransferAmount] = useState("");
+  const [selectedTransferAssetId, setSelectedTransferAssetId] = useState("");
   const [transferResult, setTransferResult] = useState("");
 
   const [users, setUsers] = useState<UserOption[]>([]);
   const [groupWalletOptions, setGroupWalletOptions] = useState<GroupWalletOption[]>([]);
   const [shareEmail, setShareEmail] = useState("");
   const [shareResult, setShareResult] = useState("");
-  const [syncResult, setSyncResult] = useState("");
-  const [syncing, setSyncing] = useState(false);
+  const [walletNameDraft, setWalletNameDraft] = useState("");
+  const [isEditingWalletName, setIsEditingWalletName] = useState(false);
+  const [renamingWallet, setRenamingWallet] = useState(false);
+  const [renameResult, setRenameResult] = useState("");
   const [trackedTokenAddresses, setTrackedTokenAddresses] = useState<string[]>([]);
   const [tokenBalances, setTokenBalances] = useState<TokenBalance[]>([]);
-  const [tokenAddressToTrack, setTokenAddressToTrack] = useState("");
+  const [walletAssets, setWalletAssets] = useState<WalletAsset[]>([]);
   const [tokenBalancesLoading, setTokenBalancesLoading] = useState(false);
+  const [readContractAddress, setReadContractAddress] = useState("");
+  const [readAbi, setReadAbi] = useState<unknown[]>([]);
+  const [readFunctions, setReadFunctions] = useState<AbiFunctionOption[]>([]);
+  const [selectedReadFunction, setSelectedReadFunction] = useState("");
+  const [readArgValues, setReadArgValues] = useState<string[]>([]);
+  const [loadingReadAbi, setLoadingReadAbi] = useState(false);
+  const [readResult, setReadResult] = useState("");
+  const [readingContract, setReadingContract] = useState(false);
+  const [writeContractAddress, setWriteContractAddress] = useState("");
+  const [writeAbi, setWriteAbi] = useState<unknown[]>([]);
+  const [writeFunctions, setWriteFunctions] = useState<AbiFunctionOption[]>([]);
+  const [selectedWriteFunction, setSelectedWriteFunction] = useState("");
+  const [writeArgValues, setWriteArgValues] = useState<string[]>([]);
+  const [loadingWriteAbi, setLoadingWriteAbi] = useState(false);
+  const [writeValueEth, setWriteValueEth] = useState("");
+  const [writeResult, setWriteResult] = useState("");
+  const [writingContract, setWritingContract] = useState(false);
 
   const [error, setError] = useState("");
 
@@ -212,14 +331,38 @@ export default function WalletDetail() {
 
   async function load() {
     try {
-      const [w, txs, userList] = await Promise.all([
+      const [w, txs, userList, assets] = await Promise.all([
         api.getWallet(walletId),
         api.getTransactions(walletId),
         api.getUsers(),
+        api.getWalletAssets(walletId),
       ]);
       setWallet(w);
+      setWalletNameDraft(w.name);
       setTransactions(txs);
       setUsers(userList);
+      setWalletAssets(assets);
+      const visibleAssets = assets.filter((asset: WalletAsset) =>
+        hasPositiveBalance(asset.balance)
+      );
+      setSelectedSendAssetId((prev) => {
+        if (visibleAssets.some((asset: WalletAsset) => asset.assetId === prev)) {
+          return prev;
+        }
+        const native = visibleAssets.find(
+          (asset: WalletAsset) => asset.type === "NATIVE"
+        );
+        return native?.assetId || visibleAssets[0]?.assetId || "";
+      });
+      setSelectedTransferAssetId((prev) => {
+        if (visibleAssets.some((asset: WalletAsset) => asset.assetId === prev)) {
+          return prev;
+        }
+        const native = visibleAssets.find(
+          (asset: WalletAsset) => asset.type === "NATIVE"
+        );
+        return native?.assetId || visibleAssets[0]?.assetId || "";
+      });
 
       if (w.walletGroupId) {
         const group = await api.getWalletGroup(w.walletGroupId);
@@ -272,8 +415,18 @@ export default function WalletDetail() {
   async function handleSend() {
     setError("");
     setSendResult("");
+    setSendMaxHint("");
+    if (!selectedSendAssetId) {
+      setError("Select an asset to send");
+      return;
+    }
     try {
-      const result = await api.sendTransaction(walletId, sendTo, sendAmount);
+      const result = await api.sendTransaction(
+        walletId,
+        sendTo,
+        sendAmount,
+        selectedSendAssetId
+      );
       setSendResult(result.txHash);
       await load();
     } catch (err: any) {
@@ -281,20 +434,32 @@ export default function WalletDetail() {
     }
   }
 
-  async function handleSendToken() {
+  async function handleSendMax() {
     setError("");
-    setSendTokenResult("");
+    setSendMaxHint("");
+    if (!selectedSendAssetId) {
+      setError("Select an asset to send");
+      return;
+    }
+    setSendingMax(true);
     try {
-      const result = await api.sendTokenTransaction(
+      const result = await api.getMaxSendAmount(
         walletId,
-        sendTokenTo,
-        sendTokenAddress,
-        sendTokenAmount
+        selectedSendAssetId,
+        sendTo || undefined
       );
-      setSendTokenResult(result.txHash);
-      await load();
+      setSendAmount(result.formattedMax);
+      if (result.assetType === "NATIVE") {
+        setSendMaxHint(
+          `Max ${result.symbol}: ${result.formattedMax} (estimated gas ${result.estimatedGasFeeFormatted} ETH)`
+        );
+      } else {
+        setSendMaxHint(`Max ${result.symbol}: ${result.formattedMax}`);
+      }
     } catch (err: any) {
       setError(err.message);
+    } finally {
+      setSendingMax(false);
     }
   }
 
@@ -305,8 +470,17 @@ export default function WalletDetail() {
       setError("Select a destination wallet");
       return;
     }
+    if (!selectedTransferAssetId) {
+      setError("Select an asset to transfer");
+      return;
+    }
     try {
-      const result = await api.internalTransfer(walletId, transferTo, transferAmount);
+      const result = await api.internalTransfer(
+        walletId,
+        transferTo,
+        transferAmount,
+        selectedTransferAssetId
+      );
       setTransferResult(
         `Internal transfer complete. Withdrawal: ${result.debitTxId}, Deposit: ${result.creditTxId}`
       );
@@ -333,36 +507,166 @@ export default function WalletDetail() {
     }
   }
 
-  async function handleManualSync() {
+  function handleReadFunctionSelection(signature: string, options = readFunctions) {
+    setSelectedReadFunction(signature);
+    const selected = options.find((option) => option.key === signature);
+    setReadArgValues(new Array(selected?.inputs.length || 0).fill(""));
+  }
+
+  function handleWriteFunctionSelection(signature: string, options = writeFunctions) {
+    setSelectedWriteFunction(signature);
+    const selected = options.find((option) => option.key === signature);
+    setWriteArgValues(new Array(selected?.inputs.length || 0).fill(""));
+  }
+
+  async function handleLoadReadAbi() {
     setError("");
-    setSyncResult("");
-    setSyncing(true);
+    setReadResult("");
+    setLoadingReadAbi(true);
     try {
-      const result = await api.syncWallet(walletId);
-      setSyncResult(
-        `Synced. Reconciled ${result.reconciledCount} withdrawal(s), found ${result.depositSync.depositsFound} deposit(s).`
+      if (!isLikelyEthAddress(readContractAddress)) {
+        throw new Error("Enter a valid contract address");
+      }
+
+      const { abi } = await api.getContractAbi(readContractAddress.trim());
+      const readOptions = parseAbiFunctionOptions(abi, "read");
+      if (!readOptions.length) {
+        throw new Error("No read functions found in ABI");
+      }
+
+      setReadAbi(abi);
+      setReadFunctions(readOptions);
+      handleReadFunctionSelection(readOptions[0].key, readOptions);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setLoadingReadAbi(false);
+    }
+  }
+
+  async function handleRenameWallet() {
+    setError("");
+    setRenameResult("");
+    const nextName = walletNameDraft.trim();
+    if (!nextName) {
+      setError("Wallet name is required");
+      return;
+    }
+
+    setRenamingWallet(true);
+    try {
+      const updated = await api.updateWallet(walletId, nextName);
+      setWallet((prev) => (prev ? { ...prev, name: updated.name } : prev));
+      setWalletNameDraft(updated.name);
+      setIsEditingWalletName(false);
+      setRenameResult("Wallet name updated.");
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setRenamingWallet(false);
+    }
+  }
+
+  async function handleLoadWriteAbi() {
+    setError("");
+    setWriteResult("");
+    setLoadingWriteAbi(true);
+    try {
+      if (!isLikelyEthAddress(writeContractAddress)) {
+        throw new Error("Enter a valid contract address");
+      }
+
+      const { abi } = await api.getContractAbi(writeContractAddress.trim());
+      const writeOptions = parseAbiFunctionOptions(abi, "write");
+      if (!writeOptions.length) {
+        throw new Error("No write functions found in ABI");
+      }
+
+      setWriteAbi(abi);
+      setWriteFunctions(writeOptions);
+      handleWriteFunctionSelection(writeOptions[0].key, writeOptions);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setLoadingWriteAbi(false);
+    }
+  }
+
+  async function handleContractRead() {
+    setError("");
+    setReadResult("");
+    setReadingContract(true);
+    try {
+      if (!isLikelyEthAddress(readContractAddress)) {
+        throw new Error("Enter a valid contract address");
+      }
+      if (!selectedReadFunction) {
+        throw new Error("Load ABI and select a function");
+      }
+      if (!readAbi.length) {
+        throw new Error("Load ABI first");
+      }
+      const selected = readFunctions.find((option) => option.key === selectedReadFunction);
+      if (!selected) {
+        throw new Error("Selected read function not found");
+      }
+
+      const args = selected.inputs.map((input, index) =>
+        toContractArgValue(readArgValues[index] || "", input.type)
       );
+      const result = await api.readContract(
+        readContractAddress.trim(),
+        readAbi,
+        selectedReadFunction,
+        args
+      );
+      setReadResult(JSON.stringify(result.result, null, 2));
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setReadingContract(false);
+    }
+  }
+
+  async function handleContractWrite() {
+    setError("");
+    setWriteResult("");
+    setWritingContract(true);
+    try {
+      if (!isLikelyEthAddress(writeContractAddress)) {
+        throw new Error("Enter a valid contract address");
+      }
+      if (!selectedWriteFunction) {
+        throw new Error("Load ABI and select a function");
+      }
+      if (!writeAbi.length) {
+        throw new Error("Load ABI first");
+      }
+      const selected = writeFunctions.find((option) => option.key === selectedWriteFunction);
+      if (!selected) {
+        throw new Error("Selected write function not found");
+      }
+
+      const args = selected.inputs.map((input, index) =>
+        toContractArgValue(writeArgValues[index] || "", input.type)
+      );
+
+      const result = await api.writeContract(
+        walletId,
+        writeContractAddress.trim(),
+        writeAbi,
+        selectedWriteFunction,
+        args,
+        writeValueEth.trim() || undefined
+      );
+
+      setWriteResult(result.txHash);
       await load();
     } catch (err: any) {
       setError(err.message);
     } finally {
-      setSyncing(false);
+      setWritingContract(false);
     }
-  }
-
-  async function handleTrackTokenBalance() {
-    setError("");
-    const tokenAddress = tokenAddressToTrack.trim();
-    if (!tokenAddress) return;
-    if (!isLikelyEthAddress(tokenAddress)) {
-      setError("Enter a valid ERC-20 contract address");
-      return;
-    }
-
-    const mergedTokens = mergeTokenAddresses(trackedTokenAddresses, [tokenAddress]);
-    setTrackedTokenAddresses(mergedTokens);
-    setTokenAddressToTrack("");
-    await refreshTokenBalances(walletId, mergedTokens);
   }
 
   if (loading) return <p className="text-gray-400 mt-10">Loading...</p>;
@@ -371,6 +675,16 @@ export default function WalletDetail() {
   const shareableUsers = users.filter(
     (user) => user.id !== wallet.ownerId && !sharedEmails.has(user.email)
   );
+  const visibleWalletAssets = walletAssets.filter((asset) =>
+    hasPositiveBalance(asset.balance)
+  );
+  const visibleTokenBalances = tokenBalances.filter((tokenBalance) =>
+    hasPositiveBalance(tokenBalance.balance)
+  );
+  const selectedSendAsset =
+    visibleWalletAssets.find((asset) => asset.assetId === selectedSendAssetId) || null;
+  const selectedTransferAsset =
+    visibleWalletAssets.find((asset) => asset.assetId === selectedTransferAssetId) || null;
 
   return (
     <div>
@@ -383,25 +697,50 @@ export default function WalletDetail() {
 
       <div className="p-6 bg-gray-900 border border-gray-800 rounded-lg mb-8">
         <div className="flex items-center justify-between gap-3 mb-4 flex-wrap">
-          <div className="flex items-center gap-3">
-            <h1 className="text-2xl font-bold">{wallet.name}</h1>
-            <span
-              className={`text-xs px-2 py-0.5 rounded-full text-white ${
-                wallet.type === "GROUPED" ? "bg-emerald-600" : "bg-blue-600"
-              }`}
-            >
-              {wallet.type}
-            </span>
+          <div className="flex items-center gap-2 flex-wrap">
+            {isEditingWalletName ? (
+              <>
+                <input
+                  type="text"
+                  value={walletNameDraft}
+                  onChange={(e) => setWalletNameDraft(e.target.value)}
+                  className="px-3 py-1.5 bg-gray-800 border border-gray-700 rounded-lg text-sm focus:outline-none focus:border-blue-500"
+                />
+                <button
+                  onClick={handleRenameWallet}
+                  disabled={renamingWallet}
+                  className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 rounded-lg text-xs font-medium transition disabled:opacity-50"
+                >
+                  {renamingWallet ? "Saving..." : "Save"}
+                </button>
+                <button
+                  onClick={() => {
+                    setIsEditingWalletName(false);
+                    setWalletNameDraft(wallet.name);
+                    setRenameResult("");
+                  }}
+                  disabled={renamingWallet}
+                  className="px-3 py-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg text-xs font-medium transition disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+              </>
+            ) : (
+              <>
+                <h1 className="text-2xl font-bold">{wallet.name}</h1>
+                <button
+                  onClick={() => {
+                    setIsEditingWalletName(true);
+                    setWalletNameDraft(wallet.name);
+                    setRenameResult("");
+                  }}
+                  className="px-3 py-1.5 bg-gray-700 hover:bg-gray-600 rounded-lg text-xs font-medium transition"
+                >
+                  Edit Name
+                </button>
+              </>
+            )}
           </div>
-          {wallet.type === "STANDARD" && (
-            <button
-              onClick={handleManualSync}
-              disabled={syncing}
-              className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 rounded-lg text-xs font-medium transition disabled:opacity-50"
-            >
-              {syncing ? "Syncing..." : "Sync Now"}
-            </button>
-          )}
         </div>
         <a
           href={getSepoliaAddressUrl(wallet.address)}
@@ -416,30 +755,13 @@ export default function WalletDetail() {
         </p>
         <div className="mt-4 p-3 bg-gray-800/50 border border-gray-700 rounded-lg">
           <p className="text-xs text-gray-400 mb-2">Tracked Token Balances</p>
-          <div className="flex flex-col sm:flex-row gap-2 mb-2">
-            <input
-              type="text"
-              value={tokenAddressToTrack}
-              onChange={(e) => setTokenAddressToTrack(e.target.value)}
-              placeholder="ERC-20 contract address (0x...)"
-              className="flex-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm focus:outline-none focus:border-blue-500"
-            />
-            <button
-              onClick={handleTrackTokenBalance}
-              className="px-3 py-2 bg-emerald-600 hover:bg-emerald-700 rounded-lg text-sm font-medium transition"
-            >
-              Add Token
-            </button>
-          </div>
           {tokenBalancesLoading ? (
             <p className="text-xs text-gray-500">Loading token balances...</p>
-          ) : tokenBalances.length === 0 ? (
-            <p className="text-xs text-gray-500">
-              No ERC-20 balances tracked yet. Add a token contract or receive one first.
-            </p>
+          ) : visibleTokenBalances.length === 0 ? (
+            <p className="text-xs text-gray-500">No ERC-20 balances tracked yet.</p>
           ) : (
             <div className="space-y-2">
-              {tokenBalances.map((tokenBalance) => (
+              {visibleTokenBalances.map((tokenBalance) => (
                 <div
                   key={tokenBalance.tokenAddress.toLowerCase()}
                   className="flex items-center justify-between gap-3 text-sm"
@@ -502,9 +824,9 @@ export default function WalletDetail() {
         </div>
       )}
 
-      {syncResult && (
-        <div className="p-3 mb-6 bg-blue-900/30 border border-blue-800 rounded-lg text-blue-300 text-sm">
-          {syncResult}
+      {renameResult && (
+        <div className="p-3 mb-6 bg-emerald-900/30 border border-emerald-800 rounded-lg text-emerald-400 text-sm">
+          {renameResult}
         </div>
       )}
 
@@ -532,8 +854,7 @@ export default function WalletDetail() {
         </div>
 
         <div className="p-4 bg-gray-900 border border-gray-800 rounded-lg">
-          <h2 className="font-semibold mb-3">Send ETH</h2>
-          <p className="text-xs text-gray-500 mb-2">Native ETH has no contract address.</p>
+          <h2 className="font-semibold mb-3">Send Asset</h2>
           <input
             type="text"
             value={sendTo}
@@ -541,19 +862,59 @@ export default function WalletDetail() {
             placeholder="Recipient address (0x...)"
             className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm mb-2 focus:outline-none focus:border-blue-500"
           />
-          <input
-            type="text"
-            value={sendAmount}
-            onChange={(e) => setSendAmount(e.target.value)}
-            placeholder="Amount in ETH"
+          <select
+            value={selectedSendAssetId}
+            onChange={(e) => {
+              setSelectedSendAssetId(e.target.value);
+              setSendAmount("");
+              setSendMaxHint("");
+            }}
             className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm mb-2 focus:outline-none focus:border-blue-500"
-          />
+          >
+            {visibleWalletAssets.length === 0 ? (
+              <option value="">No assets available</option>
+            ) : (
+              visibleWalletAssets.map((asset) => (
+                <option key={asset.assetId} value={asset.assetId}>
+                  {asset.symbol} ({asset.formatted})
+                </option>
+              ))
+            )}
+          </select>
+          {selectedSendAsset && (
+            <p className="text-xs text-gray-500 mb-2">
+              Available: {selectedSendAsset.formatted} {selectedSendAsset.symbol}
+            </p>
+          )}
+          <div className="flex gap-2 mb-2">
+            <input
+              type="text"
+              value={sendAmount}
+              onChange={(e) => setSendAmount(e.target.value)}
+              placeholder={
+                selectedSendAsset
+                  ? `Amount in ${selectedSendAsset.symbol}`
+                  : "Amount"
+              }
+              className="flex-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm focus:outline-none focus:border-blue-500"
+            />
+            <button
+              onClick={handleSendMax}
+              disabled={sendingMax || !selectedSendAssetId}
+              className="px-3 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-sm font-medium transition disabled:opacity-50"
+            >
+              {sendingMax ? "..." : "Send Max"}
+            </button>
+          </div>
           <button
             onClick={handleSend}
             className="px-4 py-2 bg-green-600 hover:bg-green-700 rounded-lg text-sm font-medium transition"
           >
             Send
           </button>
+          {sendMaxHint && (
+            <div className="mt-3 p-2 bg-gray-800 rounded text-xs text-gray-300">{sendMaxHint}</div>
+          )}
           {sendResult && (
             <div className="mt-3 p-2 bg-gray-800 rounded text-xs font-mono break-all">
               Tx Hash:{" "}
@@ -570,44 +931,163 @@ export default function WalletDetail() {
         </div>
 
         <div className="p-4 bg-gray-900 border border-gray-800 rounded-lg">
-          <h2 className="font-semibold mb-3">Send ERC-20 Token</h2>
-          <input
-            type="text"
-            value={sendTokenTo}
-            onChange={(e) => setSendTokenTo(e.target.value)}
-            placeholder="Recipient address (0x...)"
+          <h2 className="font-semibold mb-3">Contract Read</h2>
+          <p className="text-xs text-gray-500 mb-2">View/pure calls only (no transaction).</p>
+          <div className="flex gap-2 mb-2">
+            <input
+              type="text"
+              value={readContractAddress}
+              onChange={(e) => {
+                setReadContractAddress(e.target.value);
+                setReadFunctions([]);
+                setSelectedReadFunction("");
+                setReadArgValues([]);
+                setReadResult("");
+              }}
+              placeholder="Contract address (0x...)"
+              className="flex-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm focus:outline-none focus:border-blue-500"
+            />
+            <button
+              onClick={handleLoadReadAbi}
+              disabled={loadingReadAbi}
+              className="px-3 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-sm font-medium transition disabled:opacity-50"
+            >
+              {loadingReadAbi ? "Loading..." : "Load ABI"}
+            </button>
+          </div>
+          <select
+            value={selectedReadFunction}
+            onChange={(e) => handleReadFunctionSelection(e.target.value)}
+            disabled={readFunctions.length === 0}
             className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm mb-2 focus:outline-none focus:border-blue-500"
-          />
-          <input
-            type="text"
-            value={sendTokenAddress}
-            onChange={(e) => setSendTokenAddress(e.target.value)}
-            placeholder="Token contract address (e.g. USDC)"
+          >
+            {readFunctions.length === 0 ? (
+              <option value="">Load ABI to choose a read function</option>
+            ) : (
+              readFunctions.map((fn) => (
+                <option key={fn.key} value={fn.key}>
+                  {fn.label}
+                </option>
+              ))
+            )}
+          </select>
+          {(readFunctions.find((fn) => fn.key === selectedReadFunction)?.inputs || []).map(
+            (input, index) => (
+              <input
+                key={`${selectedReadFunction}-arg-${index}`}
+                type="text"
+                value={readArgValues[index] || ""}
+                onChange={(e) =>
+                  setReadArgValues((prev) => {
+                    const next = [...prev];
+                    next[index] = e.target.value;
+                    return next;
+                  })
+                }
+                placeholder={`${input.name || `arg${index + 1}`} (${input.type || "unknown"})`}
+                className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm mb-2 focus:outline-none focus:border-blue-500"
+              />
+            )
+          )}
+          <button
+            onClick={handleContractRead}
+            disabled={readingContract || !selectedReadFunction}
+            className="px-4 py-2 bg-cyan-600 hover:bg-cyan-700 rounded-lg text-sm font-medium transition disabled:opacity-50"
+          >
+            {readingContract ? "Reading..." : "Read Contract"}
+          </button>
+          {readResult && (
+            <pre className="mt-3 p-2 bg-gray-800 rounded text-xs font-mono whitespace-pre-wrap break-all">
+              {readResult}
+            </pre>
+          )}
+        </div>
+
+        <div className="p-4 bg-gray-900 border border-gray-800 rounded-lg">
+          <h2 className="font-semibold mb-3">Contract Write</h2>
+          <p className="text-xs text-gray-500 mb-2">
+            Sends a signed transaction from this wallet.
+          </p>
+          <div className="flex gap-2 mb-2">
+            <input
+              type="text"
+              value={writeContractAddress}
+              onChange={(e) => {
+                setWriteContractAddress(e.target.value);
+                setWriteFunctions([]);
+                setSelectedWriteFunction("");
+                setWriteArgValues([]);
+                setWriteResult("");
+              }}
+              placeholder="Contract address (0x...)"
+              className="flex-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm focus:outline-none focus:border-blue-500"
+            />
+            <button
+              onClick={handleLoadWriteAbi}
+              disabled={loadingWriteAbi}
+              className="px-3 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-sm font-medium transition disabled:opacity-50"
+            >
+              {loadingWriteAbi ? "Loading..." : "Load ABI"}
+            </button>
+          </div>
+          <select
+            value={selectedWriteFunction}
+            onChange={(e) => handleWriteFunctionSelection(e.target.value)}
+            disabled={writeFunctions.length === 0}
             className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm mb-2 focus:outline-none focus:border-blue-500"
-          />
+          >
+            {writeFunctions.length === 0 ? (
+              <option value="">Load ABI to choose a write function</option>
+            ) : (
+              writeFunctions.map((fn) => (
+                <option key={fn.key} value={fn.key}>
+                  {fn.label}
+                </option>
+              ))
+            )}
+          </select>
+          {(writeFunctions.find((fn) => fn.key === selectedWriteFunction)?.inputs || []).map(
+            (input, index) => (
+              <input
+                key={`${selectedWriteFunction}-arg-${index}`}
+                type="text"
+                value={writeArgValues[index] || ""}
+                onChange={(e) =>
+                  setWriteArgValues((prev) => {
+                    const next = [...prev];
+                    next[index] = e.target.value;
+                    return next;
+                  })
+                }
+                placeholder={`${input.name || `arg${index + 1}`} (${input.type || "unknown"})`}
+                className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm mb-2 focus:outline-none focus:border-blue-500"
+              />
+            )
+          )}
           <input
             type="text"
-            value={sendTokenAmount}
-            onChange={(e) => setSendTokenAmount(e.target.value)}
-            placeholder="Amount (token units)"
+            value={writeValueEth}
+            onChange={(e) => setWriteValueEth(e.target.value)}
+            placeholder="Optional native value in ETH (e.g. 0.01)"
             className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm mb-2 focus:outline-none focus:border-blue-500"
           />
           <button
-            onClick={handleSendToken}
-            className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 rounded-lg text-sm font-medium transition"
+            onClick={handleContractWrite}
+            disabled={writingContract || !selectedWriteFunction}
+            className="px-4 py-2 bg-rose-600 hover:bg-rose-700 rounded-lg text-sm font-medium transition disabled:opacity-50"
           >
-            Send Token
+            {writingContract ? "Writing..." : "Write Contract"}
           </button>
-          {sendTokenResult && (
+          {writeResult && (
             <div className="mt-3 p-2 bg-gray-800 rounded text-xs font-mono break-all">
               Tx Hash:{" "}
               <a
-                href={getSepoliaTxUrl(sendTokenResult)}
+                href={getSepoliaTxUrl(writeResult)}
                 target="_blank"
                 rel="noreferrer"
                 className="text-blue-300 hover:text-blue-200 hover:underline"
               >
-                {sendTokenResult}
+                {writeResult}
               </a>
             </div>
           )}
@@ -633,11 +1113,33 @@ export default function WalletDetail() {
                 ))
               )}
             </select>
+            <select
+              value={selectedTransferAssetId}
+              onChange={(e) => {
+                setSelectedTransferAssetId(e.target.value);
+                setTransferAmount("");
+              }}
+              className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm mb-2 focus:outline-none focus:border-blue-500"
+            >
+              {visibleWalletAssets.length === 0 ? (
+                <option value="">No assets available</option>
+              ) : (
+                visibleWalletAssets.map((asset) => (
+                  <option key={asset.assetId} value={asset.assetId}>
+                    {asset.symbol} ({asset.formatted})
+                  </option>
+                ))
+              )}
+            </select>
             <input
               type="text"
               value={transferAmount}
               onChange={(e) => setTransferAmount(e.target.value)}
-              placeholder="Amount in ETH"
+              placeholder={
+                selectedTransferAsset
+                  ? `Amount in ${selectedTransferAsset.symbol}`
+                  : "Amount"
+              }
               className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm mb-2 focus:outline-none focus:border-blue-500"
             />
             <button
@@ -703,6 +1205,8 @@ export default function WalletDetail() {
                             ? "text-green-400"
                             : tx.type === "WITHDRAWAL"
                             ? "text-red-400"
+                            : tx.type === "CONTRACT"
+                            ? "text-cyan-400"
                             : "text-yellow-400"
                         }
                       >

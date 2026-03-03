@@ -1,0 +1,7 @@
+{
+  "/page": "app/page.js",
+  "/connected-wallet/page": "app/connected-wallet/page.js",
+  "/dashboard/page": "app/dashboard/page.js",
+  "/wallets/[id]/page": "app/wallets/[id]/page.js",
+  "/wallet-groups/[id]/page": "app/wallet-groups/[id]/page.js"
+}
