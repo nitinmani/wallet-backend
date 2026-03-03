@@ -58,6 +58,52 @@ function normalizeWalletName(name: string): string {
   return name.trim().toLowerCase();
 }
 
+type WalletGroupNameCandidate = {
+  name: string;
+  nameNormalized: string | null;
+};
+
+function getNormalizedWalletGroupName(group: WalletGroupNameCandidate): string {
+  return group.nameNormalized ?? normalizeWalletName(group.name);
+}
+
+async function getOwnerWalletGroupNamesNormalized(
+  ownerId: string,
+  excludeGroupId?: string,
+  tx?: Prisma.TransactionClient
+): Promise<Set<string>> {
+  const db = getDb(tx);
+  const groups = await db.walletGroup.findMany({
+    where: {
+      ownerId,
+      ...(excludeGroupId ? { id: { not: excludeGroupId } } : {}),
+    },
+    select: { name: true, nameNormalized: true },
+  });
+
+  return new Set(groups.map(getNormalizedWalletGroupName));
+}
+
+async function getUniqueWalletGroupName(
+  ownerId: string,
+  baseName: string,
+  tx?: Prisma.TransactionClient
+): Promise<string> {
+  const trimmedBase = baseName.trim();
+  const normalizedExisting = await getOwnerWalletGroupNamesNormalized(ownerId, undefined, tx);
+
+  if (!normalizedExisting.has(normalizeWalletName(trimmedBase))) {
+    return trimmedBase;
+  }
+
+  let suffix = 2;
+  while (normalizedExisting.has(normalizeWalletName(`${trimmedBase} ${suffix}`))) {
+    suffix += 1;
+  }
+
+  return `${trimmedBase} ${suffix}`;
+}
+
 function isWalletNameUniqueConstraintError(err: unknown): boolean {
   if (!(err instanceof Prisma.PrismaClientKnownRequestError)) return false;
   if (err.code !== "P2002") return false;
@@ -84,17 +130,13 @@ async function ensureUniqueWalletGroupName(
   excludeGroupId?: string,
   tx?: Prisma.TransactionClient
 ) {
-  const db = getDb(tx);
   const normalized = normalizeWalletName(groupName);
-  const existing = await db.walletGroup.findFirst({
-    where: {
-      ownerId,
-      nameNormalized: normalized,
-      ...(excludeGroupId ? { id: { not: excludeGroupId } } : {}),
-    },
-    select: { id: true },
-  });
-  if (existing) {
+  const normalizedExisting = await getOwnerWalletGroupNamesNormalized(
+    ownerId,
+    excludeGroupId,
+    tx
+  );
+  if (normalizedExisting.has(normalized)) {
     throw new Error("Wallet group name already exists");
   }
 }
@@ -158,17 +200,18 @@ async function createWalletRecordInGroup(
 export async function createWallet(userId: string, name?: string) {
   const walletName = name?.trim() || "Default Wallet";
   const walletNameNormalized = normalizeWalletName(walletName);
-  const groupName = `${name?.trim() || "Wallet"} Group`;
-  const groupNameNormalized = name?.trim() ? normalizeWalletName(groupName) : null;
   const signer = ethers.Wallet.createRandom();
   const encryptedKey = encrypt(signer.privateKey);
   const lastSyncBlock = await provider.getBlockNumber();
 
   try {
     return await prisma.$transaction(async (tx) => {
-      if (groupNameNormalized) {
-        await ensureUniqueWalletGroupName(userId, groupName, undefined, tx);
-      }
+      const requestedName = name?.trim();
+      const groupName = requestedName
+        ? `${requestedName} Group`
+        : await getUniqueWalletGroupName(userId, "Wallet Group", tx);
+      const groupNameNormalized = normalizeWalletName(groupName);
+      await ensureUniqueWalletGroupName(userId, groupName, undefined, tx);
 
       const walletGroup = await tx.walletGroup.create({
         data: {

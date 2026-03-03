@@ -711,6 +711,23 @@ describe("walletGroupsApi", () => {
     expect(duplicateRes.body.error).toMatch(/wallet group name already exists/i);
   });
 
+  test("auto-generates unique default wallet group names when name is omitted", async () => {
+    const first = await request(app)
+      .post("/api/wallets")
+      .set("x-api-key", testApiKey)
+      .send({});
+    const second = await request(app)
+      .post("/api/wallets")
+      .set("x-api-key", testApiKey)
+      .send({});
+
+    expect(first.status).toBe(201);
+    expect(second.status).toBe(201);
+    expect(first.body.walletGroup?.name).toBeDefined();
+    expect(second.body.walletGroup?.name).toBeDefined();
+    expect(second.body.walletGroup.name).not.toBe(first.body.walletGroup.name);
+  });
+
   test("cannot rename a wallet group to an existing group name", async () => {
     await createTestWallet("Alpha Wallet");
     const betaWallet = await createTestWallet("Beta Wallet");
