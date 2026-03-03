@@ -27,3 +27,11 @@ for (const key of required) {
     process.exit(1);
   }
 }
+
+// Non-fatal warnings for optional but important vars
+if (!process.env.ETHERSCAN_API_KEY) {
+  console.warn("[config] ETHERSCAN_API_KEY is not set; connected-wallet token history will be unavailable");
+}
+if (!process.env.SEPOLIA_RPC_URL) {
+  console.warn("[config] SEPOLIA_RPC_URL is not set; using default public Infura endpoint (set your own key for production)");
+}

@@ -5,7 +5,6 @@ jest.mock("../../src/services/transactionService", () => ({
   sendTransaction: jest.fn(),
   sendAssetTransaction: jest.fn(),
   getMaxSendAmount: jest.fn(),
-  replaceByFee: jest.fn(),
   internalTransfer: jest.fn(),
   getWalletTransactions: jest.fn(),
 }));
@@ -15,7 +14,6 @@ import {
   sendTransaction,
   sendAssetTransaction,
   getMaxSendAmount,
-  replaceByFee,
   internalTransfer,
   getWalletTransactions,
 } from "../../src/services/transactionService";
@@ -174,58 +172,6 @@ describe("GET /api/wallets/:walletId/send-max", () => {
       "native:eth",
       "0xRecipient"
     );
-  });
-});
-
-// ═══════════════════════════════════════════════════════════════
-// POST /:walletId/rbf
-// ═══════════════════════════════════════════════════════════════
-describe("POST /api/wallets/:walletId/rbf", () => {
-  test("returns 400 when originalTxId is missing", async () => {
-    const res = await request(app)
-      .post("/api/wallets/wallet-1/rbf")
-      .send({ gasPrice: "2000000000" });
-    expect(res.status).toBe(400);
-    expect(res.body.error).toBe("originalTxId and gasPrice are required");
-    expect(replaceByFee).not.toHaveBeenCalled();
-  });
-
-  test("returns 400 when gasPrice is missing", async () => {
-    const res = await request(app)
-      .post("/api/wallets/wallet-1/rbf")
-      .send({ originalTxId: "tx-1" });
-    expect(res.status).toBe(400);
-    expect(res.body.error).toBe("originalTxId and gasPrice are required");
-  });
-
-  test("calls replaceByFee and returns the new transaction", async () => {
-    (replaceByFee as jest.Mock).mockResolvedValue({
-      txHash: "0xnew",
-      status: "BROADCASTING",
-      transactionId: "tx-new",
-    });
-
-    const res = await request(app)
-      .post("/api/wallets/wallet-1/rbf")
-      .send({ originalTxId: "tx-old", gasPrice: "3000000000" });
-
-    expect(res.status).toBe(200);
-    expect(replaceByFee).toHaveBeenCalledWith(
-      "wallet-1",
-      "user-1",
-      "tx-old",
-      3_000_000_000n
-    );
-    expect(res.body.txHash).toBe("0xnew");
-  });
-
-  test("returns 400 when service throws", async () => {
-    (replaceByFee as jest.Mock).mockRejectedValue(new Error("Original tx not found"));
-    const res = await request(app)
-      .post("/api/wallets/wallet-1/rbf")
-      .send({ originalTxId: "tx-ghost", gasPrice: "1000000000" });
-    expect(res.status).toBe(400);
-    expect(res.body.error).toBe("Original tx not found");
   });
 });
 

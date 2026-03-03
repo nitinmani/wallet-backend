@@ -23,8 +23,8 @@ model WalletGroup {
   address      String   @unique
   encryptedKey String?
   lastSyncBlock Int     @default(0)
-  ownerId      String?
-  owner        User?    @relation("WalletGroupOwner", fields: [ownerId], references: [id])
+  ownerId      String
+  owner        User     @relation("WalletGroupOwner", fields: [ownerId], references: [id], onDelete: Cascade)
   wallets      Wallet[]
   createdAt    DateTime @default(now())
 }
@@ -34,9 +34,9 @@ model Wallet {
   name           String         @default("Default Wallet")
   nameNormalized String?
   walletGroupId  String
-  walletGroup    WalletGroup    @relation(fields: [walletGroupId], references: [id])
+  walletGroup    WalletGroup    @relation(fields: [walletGroupId], references: [id], onDelete: Cascade)
   ownerId        String?
-  owner          User?          @relation("WalletOwner", fields: [ownerId], references: [id])
+  owner          User?          @relation("WalletOwner", fields: [ownerId], references: [id], onDelete: SetNull)
   accesses       WalletAccess[]
   assetBalances  WalletAssetBalance[]
   transactions   Transaction[]
@@ -59,7 +59,7 @@ model WalletAccess {
 model Transaction {
   id            String    @id @default(uuid())
   walletId      String
-  wallet        Wallet    @relation(fields: [walletId], references: [id])
+  wallet        Wallet    @relation(fields: [walletId], references: [id], onDelete: Cascade)
   type          TxType
   assetType     AssetType @default(NATIVE)
   assetSymbol   String    @default("ETH")

@@ -32,10 +32,15 @@ walletGroupRoutes.get(
 walletGroupRoutes.post(
   "/:walletGroupId/wallets",
   routeHandler(async (req: Request, res: Response) => {
+    const { name } = req.body;
+    if (name !== undefined && (typeof name !== "string" || name.length > 50)) {
+      res.status(400).json({ error: "name must be a string of at most 50 characters" });
+      return;
+    }
     const wallet = await createWalletInExistingWalletGroup(
       req.params.walletGroupId,
       req.user!.id,
-      req.body.name
+      name
     );
     res.status(201).json(wallet);
   })
@@ -47,6 +52,10 @@ walletGroupRoutes.patch(
     const { name } = req.body;
     if (typeof name !== "string") {
       res.status(400).json({ error: "name is required" });
+      return;
+    }
+    if (name.length > 50) {
+      res.status(400).json({ error: "name must be a string of at most 50 characters" });
       return;
     }
 

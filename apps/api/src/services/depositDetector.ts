@@ -141,6 +141,11 @@ async function getTokenMetadata(
     tokenMetadataCache.set(key, metadata);
     return metadata;
   } catch {
+    console.warn(
+      `[depositDetector] Failed to fetch metadata for token ${tokenAddress}; ` +
+      `falling back to symbol="ERC20" decimals=18. ` +
+      `Deposit amount is stored in raw token units and is correct, but display may be wrong if actual decimals differ.`
+    );
     const fallback = { symbol: "ERC20", decimals: 18 };
     tokenMetadataCache.set(key, fallback);
     return fallback;

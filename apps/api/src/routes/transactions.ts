@@ -4,7 +4,6 @@ import {
   getMaxSendAmount,
   sendAssetTransaction,
   sendTransaction,
-  replaceByFee,
   internalTransfer,
   getWalletTransactions,
 } from "../services/transactionService";
@@ -63,26 +62,6 @@ transactionRoutes.get(
       req.user!.id,
       assetId,
       typeof to === "string" ? to : undefined
-    );
-    res.json(result);
-  })
-);
-
-// Replace-by-fee
-transactionRoutes.post(
-  "/:walletId/rbf",
-  routeHandler(async (req: Request, res: Response) => {
-    const { originalTxId, gasPrice } = req.body;
-    if (!originalTxId || !gasPrice) {
-      res.status(400).json({ error: "originalTxId and gasPrice are required" });
-      return;
-    }
-
-    const result = await replaceByFee(
-      req.params.walletId,
-      req.user!.id,
-      originalTxId,
-      BigInt(gasPrice)
     );
     res.json(result);
   })

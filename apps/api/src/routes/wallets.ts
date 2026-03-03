@@ -12,9 +12,18 @@ import {
 
 export const walletRoutes = Router();
 
+function validateName(name: unknown): string | null {
+  if (name !== undefined && (typeof name !== "string" || name.length > 50)) {
+    return "name must be a string of at most 50 characters";
+  }
+  return null;
+}
+
 walletRoutes.post(
   "/",
   routeHandler(async (req: Request, res: Response) => {
+    const nameError = validateName(req.body.name);
+    if (nameError) { res.status(400).json({ error: nameError }); return; }
     const wallet = await createWallet(req.user!.id, req.body.name);
     res.status(201).json(wallet);
   })
@@ -23,6 +32,8 @@ walletRoutes.post(
 walletRoutes.post(
   "/:walletId/group-wallet",
   routeHandler(async (req: Request, res: Response) => {
+    const nameError = validateName(req.body.name);
+    if (nameError) { res.status(400).json({ error: nameError }); return; }
     const wallet = await createWalletInWalletGroup(
       req.user!.id,
       req.params.walletId,
@@ -52,6 +63,10 @@ walletRoutes.patch(
     const { name } = req.body;
     if (typeof name !== "string") {
       res.status(400).json({ error: "name is required" });
+      return;
+    }
+    if (name.length > 50) {
+      res.status(400).json({ error: "name must be a string of at most 50 characters" });
       return;
     }
 

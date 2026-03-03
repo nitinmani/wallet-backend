@@ -27,10 +27,21 @@ export async function getWalletNativeBalance(walletId: string) {
   const nativeAsset = await ensureNativeAsset();
   const balanceRaw = await getWalletAssetBalance(walletId, nativeAsset.id);
 
+  const broadcastingTxs = await prisma.transaction.findMany({
+    where: { walletId, status: "BROADCASTING" },
+    select: { lockedAmount: true },
+  });
+  const lockedRaw = broadcastingTxs.reduce(
+    (sum, tx) => sum + BigInt(tx.lockedAmount),
+    0n
+  );
+
   return {
     address: wallet.walletGroup.address,
     balance: balanceRaw.toString(),
     formatted: ethers.formatEther(balanceRaw),
+    lockedBalance: lockedRaw.toString(),
+    lockedFormatted: ethers.formatEther(lockedRaw),
     symbol: nativeAsset.symbol,
     assetId: nativeAsset.id,
   };
@@ -116,13 +127,22 @@ export async function syncBalances(): Promise<void> {
       if (wallet.walletGroup.wallets.length > 1) {
         continue;
       }
-      // Skip wallets with in-flight transactions: syncBalances writes the raw
-      // on-chain balance and would clobber the pre-decremented reserve, causing
-      // the reconciler to double-deduct when the tx confirms.
-      const broadcastingCount = await prisma.transaction.count({
-        where: { walletId: wallet.id, status: "BROADCASTING" },
+      // Skip wallets with recent in-flight transactions: syncBalances writes the
+      // raw on-chain balance and would clobber the pre-decremented reserve,
+      // causing the reconciler to double-deduct when the tx confirms.
+      // "Recent" = created within the last 30 minutes. Stale BROADCASTING txs
+      // (stuck in mempool) are no longer protected — the reconciler should have
+      // already picked them up, and continuing to skip the balance sync would
+      // leave the wallet's DB balance permanently stale.
+      const thirtyMinutesAgo = new Date(Date.now() - 30 * 60 * 1000);
+      const recentBroadcastingCount = await prisma.transaction.count({
+        where: {
+          walletId: wallet.id,
+          status: "BROADCASTING",
+          createdAt: { gte: thirtyMinutesAgo },
+        },
       });
-      if (broadcastingCount > 0) {
+      if (recentBroadcastingCount > 0) {
         continue;
       }
       const chainBalance = await provider.getBalance(wallet.walletGroup.address);

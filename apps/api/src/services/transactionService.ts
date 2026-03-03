@@ -39,7 +39,13 @@ function getInsufficientBalanceMessage(
 
 function safeSubtract(balance: bigint, amount: bigint): bigint {
   if (amount <= 0n) return balance;
-  return amount > balance ? 0n : balance - amount;
+  if (amount > balance) {
+    console.warn(
+      `[reconcile] Balance underflow: tried to deduct ${amount.toString()} from ${balance.toString()}; clamping to 0`
+    );
+    return 0n;
+  }
+  return balance - amount;
 }
 
 export async function sendTransaction(
@@ -244,11 +250,18 @@ export async function sendERC20Transaction(
       );
     }
 
-    // Reserve gas cost within the lock so concurrent sends see the reduced balance.
+    // Reserve both gas (ETH) and token balance inside the lock so concurrent
+    // sends and internal transfers see the reduced balances immediately.
     await setWalletAssetBalance(
       wallet.id,
       nativeAsset.id,
       walletNativeBalance - gasCost,
+      tx
+    );
+    await setWalletAssetBalance(
+      wallet.id,
+      trackedTokenAsset.id,
+      walletTokenBalance - tokenAmount,
       tx
     );
 
@@ -303,8 +316,9 @@ export async function sendERC20Transaction(
         status: "BROADCASTING" as const,
       };
     } catch (err: any) {
-      // Broadcast failed — restore the reserved gas balance.
+      // Broadcast failed — restore both the reserved gas and token balances.
       await setWalletAssetBalance(wallet.id, nativeAsset.id, walletNativeBalance, tx);
+      await setWalletAssetBalance(wallet.id, trackedTokenAsset.id, walletTokenBalance, tx);
       await tx.transaction.update({
         where: { id: txRecord.id },
         data: { status: "FAILED" },
@@ -426,51 +440,6 @@ export async function getMaxSendAmount(
   };
 }
 
-export async function replaceByFee(
-  walletId: string,
-  userId: string,
-  originalTxId: string,
-  newGasPrice: bigint
-) {
-  const original = await prisma.transaction.findFirst({
-    where: {
-      id: originalTxId,
-      walletId,
-      wallet: {
-        OR: [{ ownerId: userId }, { accesses: { some: { userId } } }],
-      },
-    },
-  });
-
-  if (!original) {
-    throw new Error("Original transaction not found");
-  }
-
-  if (original.nonce === null) {
-    throw new Error("Original transaction has no nonce");
-  }
-
-  const oldGasPrice = BigInt(original.gasPrice || "0");
-  if (newGasPrice <= oldGasPrice) {
-    throw new Error("New gas price must be higher than original for RBF");
-  }
-
-  const result = await sendTransaction(
-    walletId,
-    userId,
-    original.to!,
-    ethers.formatEther(original.amount),
-    { gasPrice: newGasPrice, nonce: original.nonce }
-  );
-
-  await prisma.transaction.update({
-    where: { id: originalTxId },
-    data: { status: "FAILED" },
-  });
-
-  return result;
-}
-
 // Simple in-process reconciliation guard for interview scope.
 // Limitation: if the API runs multiple replicas, each instance may reconcile.
 // Production design should use a durable queue + worker leases/distributed locks.
@@ -575,6 +544,10 @@ async function ensureTokenAssetFromChain(
     }
   } catch {
     // Fall back to generic metadata if token metadata calls fail.
+    console.warn(
+      `[reconcile] Failed to fetch metadata for token ${normalized}; ` +
+      `falling back to symbol="ERC20" decimals=18. Display may be wrong if actual decimals differ.`
+    );
   }
 
   return ensureErc20Asset(normalized, symbol, decimals, tx);
@@ -648,7 +621,8 @@ async function reconcileBroadcastingRecord(
     const nextNative = safeSubtract(restoredNative, nativeDebit);
     await setWalletAssetBalance(txRecord.walletId, nativeAsset.id, nextNative, tx);
 
-    if (txRecord.assetType === "ERC20" && isSuccess && txRecord.tokenAddress) {
+    if (txRecord.assetType === "ERC20" && !isSuccess && txRecord.tokenAddress) {
+      // Token balance was pre-decremented at send time; restore it on failure.
       const tokenAsset = await ensureErc20Asset(
         txRecord.tokenAddress,
         txRecord.assetSymbol || "ERC20",
@@ -656,8 +630,7 @@ async function reconcileBroadcastingRecord(
         tx
       );
       const currentToken = await getWalletAssetBalance(txRecord.walletId, tokenAsset.id, tx);
-      const nextToken = safeSubtract(currentToken, BigInt(txRecord.amount));
-      await setWalletAssetBalance(txRecord.walletId, tokenAsset.id, nextToken, tx);
+      await setWalletAssetBalance(txRecord.walletId, tokenAsset.id, currentToken + BigInt(txRecord.amount), tx);
     }
 
     if (isSuccess) {
@@ -706,56 +679,6 @@ export async function reconcileBroadcastingTransactions(limit = 100) {
   } finally {
     isReconcilingBroadcasts = false;
   }
-}
-
-export async function reconcileBroadcastingTransactionsForWallet(
-  walletId: string,
-  userId: string,
-  limit = 100
-) {
-  const wallet = await getAccessibleWallet(walletId, userId);
-  if (!wallet) {
-    throw new Error("Wallet not found");
-  }
-
-  return reconcileBroadcastingTransactionsForWalletId(walletId, limit);
-}
-
-async function reconcileBroadcastingTransactionsForWalletId(
-  walletId: string,
-  limit = 100
-) {
-  const broadcasting = await prisma.transaction.findMany({
-    where: {
-      walletId,
-      status: "BROADCASTING",
-      txHash: { not: null },
-    },
-    orderBy: { createdAt: "asc" },
-    take: limit,
-    include: { wallet: true },
-  });
-
-  let reconciledCount = 0;
-  for (const txRecord of broadcasting) {
-    try {
-      const lockKey = txRecord.wallet?.walletGroupId
-        ? `wallet-group:${txRecord.wallet.walletGroupId}`
-        : `wallet:${txRecord.walletId}`;
-      const reconciled = await reconcileBroadcastingRecord(
-        txRecord as BroadcastingTxRecord,
-        lockKey
-      );
-      if (reconciled) reconciledCount += 1;
-    } catch (err) {
-      console.error(
-        `Failed to reconcile transaction ${txRecord.id} (${txRecord.txHash}) for wallet ${walletId}:`,
-        err
-      );
-    }
-  }
-
-  return reconciledCount;
 }
 
 export async function internalTransfer(
