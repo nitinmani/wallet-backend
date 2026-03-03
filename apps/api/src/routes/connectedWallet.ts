@@ -1,23 +1,52 @@
 import { Request, Response, Router } from "express";
-import { getConnectedWalletAssetBalances } from "../services/balanceService";
 import {
-  getConnectedWalletById,
+  getConnectedWalletAssetBalances,
+  getConnectedWalletByAddress,
+  getMaxSendAmountForConnectedWallet,
   issueConnectedWalletChallenge,
   revokeConnectedWalletSession,
+  syncConnectedWalletOnChainState,
   verifyConnectedWalletChallenge,
 } from "../services/connectedWalletService";
-import { connectedWalletAuthMiddleware, getConnectedWalletBearerToken } from "../middleware/connectedWalletAuth";
+import { fetchContractAbiFromEtherscan } from "../services/etherscanService";
 import {
-  getConnectedWalletTransactions,
-  getMaxSendAmountForConnectedWallet,
-  registerConnectedWalletBroadcastTx,
-  syncConnectedWalletOnChainState,
-} from "../services/transactionService";
+  connectedWalletAuthMiddleware,
+  getConnectedWalletBearerToken,
+} from "../middleware/connectedWalletAuth";
 
 export const connectedWalletRoutes = Router();
 
+const FORBIDDEN_KEY_MATERIAL_FIELDS = [
+  "privatekey",
+  "encryptedkey",
+  "mnemonic",
+  "seedphrase",
+  "seed",
+];
+
+function hasForbiddenKeyMaterial(value: unknown): boolean {
+  if (value === null || value === undefined) return false;
+  if (Array.isArray(value)) {
+    return value.some((item) => hasForbiddenKeyMaterial(item));
+  }
+  if (typeof value !== "object") return false;
+
+  return Object.entries(value as Record<string, unknown>).some(([key, nested]) => {
+    const normalizedKey = key.toLowerCase().replace(/[\s_-]/g, "");
+    const isForbidden = FORBIDDEN_KEY_MATERIAL_FIELDS.some((token) =>
+      normalizedKey.includes(token)
+    );
+    return isForbidden || hasForbiddenKeyMaterial(nested);
+  });
+}
+
 connectedWalletRoutes.post("/challenge", async (req: Request, res: Response) => {
   try {
+    if (hasForbiddenKeyMaterial(req.body)) {
+      res.status(400).json({ error: "Never send private key material to this API" });
+      return;
+    }
+
     const { address } = req.body;
     if (!address || typeof address !== "string") {
       res.status(400).json({ error: "address is required" });
@@ -33,6 +62,11 @@ connectedWalletRoutes.post("/challenge", async (req: Request, res: Response) => 
 
 connectedWalletRoutes.post("/verify", async (req: Request, res: Response) => {
   try {
+    if (hasForbiddenKeyMaterial(req.body)) {
+      res.status(400).json({ error: "Never send private key material to this API" });
+      return;
+    }
+
     const { address, signature } = req.body;
     if (!address || typeof address !== "string") {
       res.status(400).json({ error: "address is required" });
@@ -44,7 +78,13 @@ connectedWalletRoutes.post("/verify", async (req: Request, res: Response) => {
     }
 
     const session = await verifyConnectedWalletChallenge(address, signature);
-    res.json(session);
+    const initialSync = await syncConnectedWalletOnChainState(
+      session.wallet.address
+    );
+    res.json({
+      ...session,
+      initialSync,
+    });
   } catch (err: any) {
     res.status(400).json({ error: err.message });
   }
@@ -66,11 +106,7 @@ connectedWalletRoutes.post("/logout", async (req: Request, res: Response) => {
 
 connectedWalletRoutes.get("/me", async (req: Request, res: Response) => {
   try {
-    const wallet = await getConnectedWalletById(req.connectedWallet!.walletId);
-    if (!wallet) {
-      res.status(404).json({ error: "Connected wallet not found" });
-      return;
-    }
+    const wallet = await getConnectedWalletByAddress(req.connectedWallet!.address);
     res.json(wallet);
   } catch (err: any) {
     res.status(400).json({ error: err.message });
@@ -79,17 +115,8 @@ connectedWalletRoutes.get("/me", async (req: Request, res: Response) => {
 
 connectedWalletRoutes.get("/assets", async (req: Request, res: Response) => {
   try {
-    const assets = await getConnectedWalletAssetBalances(req.connectedWallet!.walletId);
+    const assets = await getConnectedWalletAssetBalances(req.connectedWallet!.address);
     res.json(assets);
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
-  }
-});
-
-connectedWalletRoutes.get("/transactions", async (req: Request, res: Response) => {
-  try {
-    const transactions = await getConnectedWalletTransactions(req.connectedWallet!.walletId);
-    res.json(transactions);
   } catch (err: any) {
     res.status(400).json({ error: err.message });
   }
@@ -97,7 +124,7 @@ connectedWalletRoutes.get("/transactions", async (req: Request, res: Response) =
 
 connectedWalletRoutes.post("/sync", async (req: Request, res: Response) => {
   try {
-    const result = await syncConnectedWalletOnChainState(req.connectedWallet!.walletId);
+    const result = await syncConnectedWalletOnChainState(req.connectedWallet!.address);
     res.json(result);
   } catch (err: any) {
     res.status(400).json({ error: err.message });
@@ -114,7 +141,7 @@ connectedWalletRoutes.get("/send-max", async (req: Request, res: Response) => {
     }
 
     const result = await getMaxSendAmountForConnectedWallet(
-      req.connectedWallet!.walletId,
+      req.connectedWallet!.address,
       assetId,
       typeof to === "string" ? to : undefined
     );
@@ -124,29 +151,10 @@ connectedWalletRoutes.get("/send-max", async (req: Request, res: Response) => {
   }
 });
 
-connectedWalletRoutes.post("/register-tx", async (req: Request, res: Response) => {
+connectedWalletRoutes.get("/abi/:contractAddress", async (req: Request, res: Response) => {
   try {
-    const { txHash, to, amount, assetId, nonce } = req.body;
-    if (!txHash || typeof txHash !== "string") {
-      res.status(400).json({ error: "txHash is required" });
-      return;
-    }
-    if (!amount || typeof amount !== "string") {
-      res.status(400).json({ error: "amount is required" });
-      return;
-    }
-
-    const result = await registerConnectedWalletBroadcastTx(
-      req.connectedWallet!.walletId,
-      {
-        txHash,
-        to: typeof to === "string" ? to : undefined,
-        amount,
-        assetId: typeof assetId === "string" ? assetId : undefined,
-        nonce: typeof nonce === "number" ? nonce : undefined,
-      }
-    );
-    res.json(result);
+    const abi = await fetchContractAbiFromEtherscan(req.params.contractAddress);
+    res.json({ abi });
   } catch (err: any) {
     res.status(400).json({ error: err.message });
   }

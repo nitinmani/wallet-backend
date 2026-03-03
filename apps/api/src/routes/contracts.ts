@@ -1,6 +1,7 @@
 import { Request, Response, Router } from "express";
 import { ethers } from "ethers";
 import { readContract, writeContract } from "../services/contractService";
+import { fetchContractAbiFromEtherscan } from "../services/etherscanService";
 
 export const contractRoutes = Router();
 
@@ -23,6 +24,15 @@ function parseAbi(abiInput: unknown): ethers.InterfaceAbi {
 
   throw new Error("abi is required and must be an array or JSON string");
 }
+
+contractRoutes.get("/abi/:contractAddress", async (req: Request, res: Response) => {
+  try {
+    const abi = await fetchContractAbiFromEtherscan(req.params.contractAddress);
+    res.json({ abi });
+  } catch (err: any) {
+    res.status(400).json({ error: err.message });
+  }
+});
 
 contractRoutes.post("/read", async (req: Request, res: Response) => {
   try {

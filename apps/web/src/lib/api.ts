@@ -153,20 +153,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ name }),
     }),
-  syncWalletGroup: (walletGroupId: string) =>
-    apiFetch(`/wallet-groups/${walletGroupId}/sync`, {
-      method: "POST",
-    }),
 
   updateWallet: (walletId: string, name: string) =>
     apiFetch(`/wallets/${walletId}`, {
       method: "PATCH",
       body: JSON.stringify({ name }),
-    }),
-
-  syncWallet: (walletId: string) =>
-    apiFetch(`/wallets/${walletId}/sync`, {
-      method: "POST",
     }),
 
   updateWalletGroup: (walletGroupId: string, name: string) =>
@@ -232,6 +223,8 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ contractAddress, abi, method, args, blockTag }),
     }),
+  getContractAbi: (contractAddress: string) =>
+    apiFetch(`/contracts/abi/${encodeURIComponent(contractAddress)}`),
 
   writeContract: (
     walletId: string,
@@ -274,25 +267,14 @@ export const api = {
     }),
   connectedWalletGetMe: () => connectedWalletFetch("/connected-wallet/me"),
   connectedWalletGetAssets: () => connectedWalletFetch("/connected-wallet/assets"),
-  connectedWalletGetTransactions: () =>
-    connectedWalletFetch("/connected-wallet/transactions"),
   connectedWalletSync: () =>
     connectedWalletFetch("/connected-wallet/sync", { method: "POST" }),
+  connectedWalletGetContractAbi: (contractAddress: string) =>
+    connectedWalletFetch(`/connected-wallet/abi/${encodeURIComponent(contractAddress)}`),
   connectedWalletGetMaxSendAmount: (assetId: string, to?: string) =>
     connectedWalletFetch(
       `/connected-wallet/send-max?assetId=${encodeURIComponent(assetId)}${
         to ? `&to=${encodeURIComponent(to)}` : ""
       }`
     ),
-  connectedWalletRegisterTx: (
-    txHash: string,
-    amount: string,
-    to?: string,
-    assetId?: string,
-    nonce?: number
-  ) =>
-    connectedWalletFetch("/connected-wallet/register-tx", {
-      method: "POST",
-      body: JSON.stringify({ txHash, amount, to, assetId, nonce }),
-    }),
 };

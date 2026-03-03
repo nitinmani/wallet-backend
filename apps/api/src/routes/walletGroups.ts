@@ -1,5 +1,4 @@
 import { Request, Response, Router } from "express";
-import { syncWalletGroupOnChainState } from "../services/transactionService";
 import {
   createWalletInExistingWalletGroup,
   getUserWalletGroups,
@@ -58,18 +57,6 @@ walletGroupRoutes.patch("/:walletGroupId", async (req: Request, res: Response) =
       name
     );
     res.json(walletGroup);
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
-  }
-});
-
-walletGroupRoutes.post("/:walletGroupId/sync", async (req: Request, res: Response) => {
-  try {
-    const result = await syncWalletGroupOnChainState(
-      req.params.walletGroupId,
-      req.user!.id
-    );
-    res.json(result);
   } catch (err: any) {
     res.status(400).json({ error: err.message });
   }

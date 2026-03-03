@@ -3,7 +3,7 @@ import { Prisma } from "@prisma/client";
 import { withPgAdvisoryLock } from "../lib/pgLock";
 import { prisma } from "../lib/prisma";
 import { broadcastSignedTransaction, provider } from "../lib/provider";
-import { ensureNativeAsset, getWalletAssetBalance } from "./assetService";
+import { ensureNativeAsset, getWalletAssetBalance, setWalletAssetBalance } from "./assetService";
 import { getAccessibleWallet, getWalletSigningContext } from "./walletService";
 
 type TxOverrides = {
@@ -183,20 +183,30 @@ export async function writeContract(input: ContractWriteInput) {
       nativeAsset.id,
       tx
     );
-    if (valueWei + gasCost > walletNativeBalance) {
+    const totalReserved = valueWei + gasCost;
+    if (totalReserved > walletNativeBalance) {
       throw new Error(
         getInsufficientBalanceMessage(valueWei, gasCost, walletNativeBalance)
       );
     }
 
+    // Reserve funds within the lock so concurrent sends see the reduced balance.
+    await setWalletAssetBalance(
+      wallet.id,
+      nativeAsset.id,
+      walletNativeBalance - totalReserved,
+      tx
+    );
+
     const txRecord = await tx.transaction.create({
       data: {
         walletId,
-        type: "WITHDRAWAL",
+        type: "CONTRACT",
         to: contractAddress,
         from: signer.address,
         amount: valueWei.toString(),
         gasPrice: effectiveGasPrice.toString(),
+        lockedAmount: totalReserved.toString(),
         status: "PENDING",
       },
     });
@@ -237,6 +247,8 @@ export async function writeContract(input: ContractWriteInput) {
         status: "BROADCASTING" as const,
       };
     } catch (err: any) {
+      // Broadcast failed — restore the reserved balance.
+      await setWalletAssetBalance(wallet.id, nativeAsset.id, walletNativeBalance, tx);
       await tx.transaction.update({
         where: { id: txRecord.id },
         data: { status: "FAILED" },

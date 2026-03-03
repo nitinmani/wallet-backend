@@ -10,12 +10,11 @@ import {
   setWalletAssetBalance,
 } from "./assetService";
 import {
-  detectDepositsForSharedKeyWallet,
   detectDepositsForWallet,
+  syncAllDepositsForWallet,
 } from "./depositDetector";
 import {
   getAccessibleWallet,
-  getWalletGroupById,
   getWalletSigningContext,
 } from "./walletService";
 
@@ -31,7 +30,10 @@ async function estimateGasCost(
   overrideGasPrice?: bigint
 ): Promise<{ gasCost: bigint; effectiveGasPrice: bigint }> {
   if (overrideGasPrice !== undefined) {
-    return { gasCost: gasLimit * overrideGasPrice, effectiveGasPrice: overrideGasPrice };
+    return {
+      gasCost: gasLimit * overrideGasPrice,
+      effectiveGasPrice: overrideGasPrice,
+    };
   }
   const feeData = await provider.getFeeData();
   const effectiveGasPrice = feeData.maxFeePerGas ?? feeData.gasPrice ?? 0n;
@@ -42,7 +44,11 @@ function formatRequiredBalance(amount: bigint, gasCost: bigint) {
   return ethers.formatEther(amount + gasCost);
 }
 
-function getInsufficientBalanceMessage(amount: bigint, gasCost: bigint, available: bigint) {
+function getInsufficientBalanceMessage(
+  amount: bigint,
+  gasCost: bigint,
+  available: bigint
+) {
   return `Insufficient balance: need ${formatRequiredBalance(
     amount,
     gasCost
@@ -51,16 +57,6 @@ function getInsufficientBalanceMessage(amount: bigint, gasCost: bigint, availabl
 
 function getWalletLockKey(walletId: string, walletGroupId: string | null) {
   return walletGroupId ? `wallet-group:${walletGroupId}` : `wallet:${walletId}`;
-}
-
-async function getNonCustodialWalletById(walletId: string) {
-  return prisma.wallet.findFirst({
-    where: {
-      id: walletId,
-      walletGroup: { custodyType: "NON_CUSTODIAL" },
-    },
-    include: { walletGroup: true },
-  });
 }
 
 function safeSubtract(balance: bigint, amount: bigint): bigint {
@@ -135,11 +131,20 @@ export async function sendTransaction(
       nativeAsset.id,
       tx
     );
-    if (weiAmount + gasCost > walletNativeBalance) {
+    const totalReserved = weiAmount + gasCost;
+    if (totalReserved > walletNativeBalance) {
       throw new Error(
         getInsufficientBalanceMessage(weiAmount, gasCost, walletNativeBalance)
       );
     }
+
+    // Reserve funds within the lock so concurrent sends see the reduced balance.
+    await setWalletAssetBalance(
+      wallet.id,
+      nativeAsset.id,
+      walletNativeBalance - totalReserved,
+      tx
+    );
 
     const txRecord = await tx.transaction.create({
       data: {
@@ -149,14 +154,14 @@ export async function sendTransaction(
         from: signer.address,
         amount: weiAmount.toString(),
         gasPrice: effectiveGasPrice.toString(),
+        lockedAmount: totalReserved.toString(),
         status: "PENDING",
       },
     });
 
     try {
       const network = await provider.getNetwork();
-      const nonce =
-        overrides?.nonce ?? (await getNextNonce(tx, signer.address));
+      const nonce = overrides?.nonce ?? (await getNextNonce(tx, signer.address));
       const gasPrice = overrides?.gasPrice ?? effectiveGasPrice;
       const txParams: ethers.TransactionRequest = {
         to,
@@ -185,6 +190,8 @@ export async function sendTransaction(
         status: "BROADCASTING" as const,
       };
     } catch (err: any) {
+      // Broadcast failed before any on-chain effect — restore the reserved balance.
+      await setWalletAssetBalance(wallet.id, nativeAsset.id, walletNativeBalance, tx);
       await tx.transaction.update({
         where: { id: txRecord.id },
         data: { status: "FAILED" },
@@ -285,6 +292,14 @@ export async function sendERC20Transaction(
       );
     }
 
+    // Reserve gas cost within the lock so concurrent sends see the reduced balance.
+    await setWalletAssetBalance(
+      wallet.id,
+      nativeAsset.id,
+      walletNativeBalance - gasCost,
+      tx
+    );
+
     const txRecord = await tx.transaction.create({
       data: {
         walletId,
@@ -297,6 +312,7 @@ export async function sendERC20Transaction(
         from: signer.address,
         amount: tokenAmount.toString(),
         gasPrice: effectiveGasPrice.toString(),
+        lockedAmount: gasCost.toString(),
         status: "PENDING",
       },
     });
@@ -305,10 +321,7 @@ export async function sendERC20Transaction(
       const network = await provider.getNetwork();
       const nonce = overrides?.nonce ?? (await getNextNonce(tx, signer.address));
       const gasPrice = overrides?.gasPrice ?? effectiveGasPrice;
-      const data = token.interface.encodeFunctionData("transfer", [
-        to,
-        tokenAmount,
-      ]);
+      const data = token.interface.encodeFunctionData("transfer", [to, tokenAmount]);
 
       const txParams: ethers.TransactionRequest = {
         to: tokenAddress,
@@ -338,6 +351,8 @@ export async function sendERC20Transaction(
         status: "BROADCASTING" as const,
       };
     } catch (err: any) {
+      // Broadcast failed — restore the reserved gas balance.
+      await setWalletAssetBalance(wallet.id, nativeAsset.id, walletNativeBalance, tx);
       await tx.transaction.update({
         where: { id: txRecord.id },
         data: { status: "FAILED" },
@@ -437,7 +452,6 @@ export async function getMaxSendAmount(
       value: 0n,
     });
   } catch {
-    // Fallback for estimate failures (e.g. contract recipient without payable fallback).
     gasLimit = 21_000n;
   }
 
@@ -457,184 +471,6 @@ export async function getMaxSendAmount(
     formattedMax: ethers.formatEther(maxAmount),
     estimatedGasFee: gasCost.toString(),
     estimatedGasFeeFormatted: ethers.formatEther(gasCost),
-  };
-}
-
-export async function getMaxSendAmountForConnectedWallet(
-  walletId: string,
-  assetId: string,
-  to?: string
-) {
-  const wallet = await getNonCustodialWalletById(walletId);
-  if (!wallet) {
-    throw new Error("Connected wallet not found");
-  }
-
-  const assetRow = await prisma.walletAssetBalance.findFirst({
-    where: { walletId, assetId },
-    include: { asset: true },
-  });
-
-  if (!assetRow) {
-    throw new Error("Asset not found in wallet");
-  }
-
-  if (assetRow.asset.type === "ERC20") {
-    if (!assetRow.asset.contractAddress) {
-      throw new Error("ERC20 asset is missing contract address");
-    }
-    const token = new ethers.Contract(
-      assetRow.asset.contractAddress,
-      [
-        "function balanceOf(address owner) view returns (uint256)",
-      ],
-      provider
-    );
-    const chainTokenBalance = BigInt(
-      (await token.balanceOf(wallet.walletGroup.address)).toString()
-    );
-    await setWalletAssetBalance(walletId, assetRow.assetId, chainTokenBalance);
-
-    return {
-      assetId: assetRow.assetId,
-      assetType: "ERC20" as const,
-      symbol: assetRow.asset.symbol,
-      decimals: assetRow.asset.decimals,
-      balance: chainTokenBalance.toString(),
-      formattedBalance: ethers.formatUnits(chainTokenBalance, assetRow.asset.decimals),
-      maxAmount: chainTokenBalance.toString(),
-      formattedMax: ethers.formatUnits(chainTokenBalance, assetRow.asset.decimals),
-      estimatedGasFee: "0",
-      estimatedGasFeeFormatted: "0",
-    };
-  }
-
-  const chainNativeBalance = await provider.getBalance(wallet.walletGroup.address);
-  await setWalletAssetBalance(walletId, assetRow.assetId, chainNativeBalance);
-  const recipient = to && ethers.isAddress(to) ? to : wallet.walletGroup.address;
-
-  let gasLimit = 21_000n;
-  try {
-    gasLimit = await provider.estimateGas({
-      from: wallet.walletGroup.address,
-      to: recipient,
-      value: 0n,
-    });
-  } catch {
-    gasLimit = 21_000n;
-  }
-
-  const { gasCost } = await estimateGasCost(gasLimit);
-  const maxAmount = chainNativeBalance > gasCost ? chainNativeBalance - gasCost : 0n;
-
-  return {
-    assetId: assetRow.assetId,
-    assetType: "NATIVE" as const,
-    symbol: assetRow.asset.symbol,
-    decimals: assetRow.asset.decimals,
-    balance: chainNativeBalance.toString(),
-    formattedBalance: ethers.formatEther(chainNativeBalance),
-    maxAmount: maxAmount.toString(),
-    formattedMax: ethers.formatEther(maxAmount),
-    estimatedGasFee: gasCost.toString(),
-    estimatedGasFeeFormatted: ethers.formatEther(gasCost),
-  };
-}
-
-export async function registerConnectedWalletBroadcastTx(
-  walletId: string,
-  input: {
-    txHash: string;
-    to?: string;
-    amount: string;
-    assetId?: string;
-    nonce?: number;
-  }
-) {
-  const wallet = await getNonCustodialWalletById(walletId);
-  if (!wallet) {
-    throw new Error("Connected wallet not found");
-  }
-
-  if (!/^0x[a-fA-F0-9]{64}$/.test(input.txHash)) {
-    throw new Error("Invalid txHash");
-  }
-
-  if (!input.amount || typeof input.amount !== "string") {
-    throw new Error("amount is required");
-  }
-
-  const existingTx = await prisma.transaction.findFirst({
-    where: {
-      walletId,
-      txHash: input.txHash,
-    },
-  });
-  if (existingTx) {
-    return {
-      transactionId: existingTx.id,
-      txHash: existingTx.txHash,
-      status: existingTx.status,
-    };
-  }
-
-  let assetRow = input.assetId
-    ? await prisma.walletAssetBalance.findFirst({
-        where: { walletId, assetId: input.assetId },
-        include: { asset: true },
-      })
-    : null;
-
-  if (input.assetId && !assetRow) {
-    throw new Error("Asset not found in wallet");
-  }
-
-  if (!assetRow) {
-    const nativeAsset = await ensureNativeAsset();
-    await setWalletAssetBalance(walletId, nativeAsset.id, await getWalletAssetBalance(walletId, nativeAsset.id));
-    assetRow = await prisma.walletAssetBalance.findFirst({
-      where: { walletId, assetId: nativeAsset.id },
-      include: { asset: true },
-    });
-  }
-
-  if (!assetRow) {
-    throw new Error("Unable to initialize native asset for connected wallet");
-  }
-
-  const normalizedAddress = ethers.getAddress(wallet.walletGroup.address);
-  const chainTx = await provider.getTransaction(input.txHash);
-  if (chainTx?.from && ethers.getAddress(chainTx.from) !== normalizedAddress) {
-    throw new Error("Transaction sender does not match connected wallet");
-  }
-
-  const parsedAmount =
-    assetRow.asset.type === "NATIVE"
-      ? ethers.parseEther(input.amount)
-      : ethers.parseUnits(input.amount, assetRow.asset.decimals);
-
-  const txRecord = await prisma.transaction.create({
-    data: {
-      walletId,
-      type: "WITHDRAWAL",
-      assetType: assetRow.asset.type,
-      assetSymbol: assetRow.asset.symbol,
-      tokenAddress: assetRow.asset.contractAddress,
-      tokenDecimals: assetRow.asset.type === "ERC20" ? assetRow.asset.decimals : null,
-      to: chainTx?.to || input.to || null,
-      from: normalizedAddress,
-      amount: parsedAmount.toString(),
-      txHash: input.txHash,
-      nonce: input.nonce ?? chainTx?.nonce ?? null,
-      gasPrice: chainTx?.gasPrice?.toString() || "0",
-      status: "BROADCASTING",
-    },
-  });
-
-  return {
-    transactionId: txRecord.id,
-    txHash: txRecord.txHash,
-    status: txRecord.status,
   };
 }
 
@@ -692,56 +528,194 @@ type BroadcastingTxRecord = {
   id: string;
   txHash: string | null;
   walletId: string;
+  type: "DEPOSIT" | "WITHDRAWAL" | "INTERNAL" | "CONTRACT";
+  from: string | null;
   status: "BROADCASTING";
   assetType: "NATIVE" | "ERC20";
   tokenAddress: string | null;
   tokenDecimals: number | null;
   assetSymbol: string;
   amount: string;
+  lockedAmount: string;
 };
 
+const ERC20_TRANSFER_TOPIC = ethers.id("Transfer(address,address,uint256)");
+
+function parseIndexedAddress(topic: string): string | null {
+  if (typeof topic !== "string" || topic.length !== 66) {
+    return null;
+  }
+  try {
+    return ethers.getAddress(`0x${topic.slice(26)}`);
+  } catch {
+    return null;
+  }
+}
+
+function collectErc20NetDeltasForAddress(
+  logs: readonly { address: string; topics: readonly string[]; data: string }[],
+  address: string
+): Map<string, bigint> {
+  const target = address.toLowerCase();
+  const deltas = new Map<string, bigint>();
+
+  for (const log of logs) {
+    if (!log?.address || !ethers.isAddress(log.address)) continue;
+    if (!Array.isArray(log.topics) || log.topics.length < 3) continue;
+    if (log.topics[0].toLowerCase() !== ERC20_TRANSFER_TOPIC.toLowerCase()) continue;
+
+    const fromAddress = parseIndexedAddress(log.topics[1]);
+    const toAddress = parseIndexedAddress(log.topics[2]);
+    if (!fromAddress && !toAddress) continue;
+
+    let amount: bigint;
+    try {
+      amount = BigInt(log.data);
+    } catch {
+      continue;
+    }
+    if (amount === 0n) continue;
+
+    let delta = 0n;
+    if (fromAddress?.toLowerCase() === target) {
+      delta -= amount;
+    }
+    if (toAddress?.toLowerCase() === target) {
+      delta += amount;
+    }
+    if (delta === 0n) continue;
+
+    const tokenAddress = ethers.getAddress(log.address);
+    deltas.set(tokenAddress, (deltas.get(tokenAddress) || 0n) + delta);
+  }
+
+  return deltas;
+}
+
+async function ensureTokenAssetFromChain(
+  tokenAddress: string,
+  tx?: Prisma.TransactionClient
+) {
+  const normalized = ethers.getAddress(tokenAddress);
+  const db = tx ?? prisma;
+
+  const existing = await db.asset.findFirst({
+    where: { contractAddress: normalized },
+  });
+  if (existing) {
+    return existing;
+  }
+
+  const token = new ethers.Contract(normalized, ERC20_ABI, provider);
+  let symbol = "ERC20";
+  let decimals = 18;
+  try {
+    const [chainSymbol, chainDecimals] = await Promise.all([
+      token.symbol(),
+      token.decimals(),
+    ]);
+    if (typeof chainSymbol === "string" && chainSymbol.trim()) {
+      symbol = chainSymbol.trim();
+    }
+    const parsedDecimals = Number(chainDecimals);
+    if (!Number.isNaN(parsedDecimals)) {
+      decimals = parsedDecimals;
+    }
+  } catch {
+    // Fall back to generic metadata if token metadata calls fail.
+  }
+
+  return ensureErc20Asset(normalized, symbol, decimals, tx);
+}
+
+async function applyContractTokenDeltasFromReceipt(
+  txRecord: BroadcastingTxRecord,
+  receipt: ethers.TransactionReceipt,
+  tx?: Prisma.TransactionClient
+) {
+  if (txRecord.type !== "CONTRACT" || !txRecord.from || !ethers.isAddress(txRecord.from)) {
+    return;
+  }
+
+  const actor = ethers.getAddress(txRecord.from);
+  const tokenDeltas = collectErc20NetDeltasForAddress(receipt.logs, actor);
+
+  for (const [tokenAddress, delta] of tokenDeltas.entries()) {
+    if (delta === 0n) continue;
+    const tokenAsset = await ensureTokenAssetFromChain(tokenAddress, tx);
+    const current = await getWalletAssetBalance(txRecord.walletId, tokenAsset.id, tx);
+    const next = current + delta;
+
+    if (next < 0n) {
+      console.warn(
+        `[reconcile] Contract delta underflow walletId=${txRecord.walletId} token=${tokenAddress} current=${current.toString()} delta=${delta.toString()}`
+      );
+      await setWalletAssetBalance(txRecord.walletId, tokenAsset.id, 0n, tx);
+      continue;
+    }
+
+    await setWalletAssetBalance(txRecord.walletId, tokenAsset.id, next, tx);
+  }
+}
+
 async function reconcileBroadcastingRecord(
-  txRecord: BroadcastingTxRecord
+  txRecord: BroadcastingTxRecord,
+  lockKey: string
 ): Promise<boolean> {
   if (!txRecord.txHash) return false;
 
+  // Fetch on-chain data OUTSIDE the advisory lock so we don't hold the
+  // Prisma transaction open during potentially slow network calls.
   const receipt = await provider.getTransactionReceipt(txRecord.txHash);
   if (!receipt) {
     return false;
   }
 
   const chainTx = await provider.getTransaction(txRecord.txHash);
-  const gasPrice =
-    receipt.gasPrice ??
-    chainTx?.gasPrice ??
-    0n;
+  const gasPrice = receipt.gasPrice ?? chainTx?.gasPrice ?? 0n;
   const gasCost = receipt.gasUsed * gasPrice;
   const value = chainTx?.value ?? 0n;
   const isSuccess = receipt.status === 1;
 
-  const nativeAsset = await ensureNativeAsset();
-  const currentNative = await getWalletAssetBalance(txRecord.walletId, nativeAsset.id);
-  const nativeDebit = gasCost + (txRecord.assetType === "NATIVE" && isSuccess ? value : 0n);
-  const nextNative = safeSubtract(currentNative, nativeDebit);
-  await setWalletAssetBalance(txRecord.walletId, nativeAsset.id, nextNative);
+  // Acquire advisory lock for the balance update + status flip.
+  // Re-check status under the lock to handle concurrent reconcilers.
+  await withPgAdvisoryLock(lockKey, async (tx) => {
+    const fresh = await tx.transaction.findUnique({
+      where: { id: txRecord.id },
+      select: { status: true, lockedAmount: true },
+    });
+    if (!fresh || fresh.status !== "BROADCASTING") return;
 
-  if (txRecord.assetType === "ERC20" && isSuccess && txRecord.tokenAddress) {
-    const tokenAsset = await ensureErc20Asset(
-      txRecord.tokenAddress,
-      txRecord.assetSymbol || "ERC20",
-      txRecord.tokenDecimals ?? 18
-    );
-    const currentToken = await getWalletAssetBalance(txRecord.walletId, tokenAsset.id);
-    const nextToken = safeSubtract(currentToken, BigInt(txRecord.amount));
-    await setWalletAssetBalance(txRecord.walletId, tokenAsset.id, nextToken);
-  }
+    // Restore the amount that was reserved at send time, then apply the
+    // actual on-chain cost. This handles estimated-vs-actual gas differences.
+    const lockedAmount = BigInt(fresh.lockedAmount ?? "0");
+    const nativeAsset = await ensureNativeAsset(tx);
+    const currentNative = await getWalletAssetBalance(txRecord.walletId, nativeAsset.id, tx);
+    const restoredNative = currentNative + lockedAmount;
+    const nativeDebit = gasCost + (txRecord.assetType === "NATIVE" && isSuccess ? value : 0n);
+    const nextNative = safeSubtract(restoredNative, nativeDebit);
+    await setWalletAssetBalance(txRecord.walletId, nativeAsset.id, nextNative, tx);
 
-  await prisma.transaction.updateMany({
-    where: {
-      id: txRecord.id,
-      status: "BROADCASTING",
-    },
-    data: { status: isSuccess ? "CONFIRMED" : "FAILED" },
+    if (txRecord.assetType === "ERC20" && isSuccess && txRecord.tokenAddress) {
+      const tokenAsset = await ensureErc20Asset(
+        txRecord.tokenAddress,
+        txRecord.assetSymbol || "ERC20",
+        txRecord.tokenDecimals ?? 18,
+        tx
+      );
+      const currentToken = await getWalletAssetBalance(txRecord.walletId, tokenAsset.id, tx);
+      const nextToken = safeSubtract(currentToken, BigInt(txRecord.amount));
+      await setWalletAssetBalance(txRecord.walletId, tokenAsset.id, nextToken, tx);
+    }
+
+    if (isSuccess) {
+      await applyContractTokenDeltasFromReceipt(txRecord, receipt, tx);
+    }
+
+    await tx.transaction.update({
+      where: { id: txRecord.id },
+      data: { status: isSuccess ? "CONFIRMED" : "FAILED" },
+    });
   });
 
   return true;
@@ -766,7 +740,10 @@ export async function reconcileBroadcastingTransactions(limit = 100) {
 
     for (const txRecord of broadcasting) {
       try {
-        await reconcileBroadcastingRecord(txRecord as BroadcastingTxRecord);
+        const lockKey = txRecord.wallet?.walletGroupId
+          ? `wallet-group:${txRecord.wallet.walletGroupId}`
+          : `wallet:${txRecord.walletId}`;
+        await reconcileBroadcastingRecord(txRecord as BroadcastingTxRecord, lockKey);
       } catch (err) {
         console.error(
           `Failed to reconcile transaction ${txRecord.id} (${txRecord.txHash}):`,
@@ -810,8 +787,12 @@ async function reconcileBroadcastingTransactionsForWalletId(
   let reconciledCount = 0;
   for (const txRecord of broadcasting) {
     try {
+      const lockKey = txRecord.wallet?.walletGroupId
+        ? `wallet-group:${txRecord.wallet.walletGroupId}`
+        : `wallet:${txRecord.walletId}`;
       const reconciled = await reconcileBroadcastingRecord(
-        txRecord as BroadcastingTxRecord
+        txRecord as BroadcastingTxRecord,
+        lockKey
       );
       if (reconciled) reconciledCount += 1;
     } catch (err) {
@@ -837,7 +818,7 @@ export async function syncWalletOnChainState(walletId: string, userId: string) {
     200
   );
 
-  const depositSync = await detectDepositsForWallet(walletId, userId);
+  const depositSync = await syncAllDepositsForWallet(walletId, userId);
   const updatedWallet = await getAccessibleWallet(walletId, userId);
 
   return {
@@ -845,101 +826,6 @@ export async function syncWalletOnChainState(walletId: string, userId: string) {
     reconciledCount,
     depositSync,
   };
-}
-
-export async function syncConnectedWalletOnChainState(walletId: string) {
-  const wallet = await getNonCustodialWalletById(walletId);
-  if (!wallet) {
-    throw new Error("Connected wallet not found");
-  }
-
-  const reconciledCount = await reconcileBroadcastingTransactionsForWalletId(
-    walletId,
-    200
-  );
-
-  const depositSync = await detectDepositsForSharedKeyWallet({
-    walletGroupId: wallet.walletGroupId,
-    id: wallet.id,
-    address: wallet.walletGroup.address,
-    lastSyncBlock: wallet.walletGroup.lastSyncBlock,
-  });
-
-  return {
-    reconciledCount,
-    depositSync,
-  };
-}
-
-export async function syncWalletGroupOnChainState(
-  walletGroupId: string,
-  userId: string
-) {
-  const walletGroup = await getWalletGroupById(walletGroupId, userId);
-  if (!walletGroup) {
-    throw new Error("Wallet group not found");
-  }
-
-  const groupWallets = walletGroup.wallets;
-  if (groupWallets.length === 0) {
-    throw new Error("Wallet group has no wallets");
-  }
-
-  const primaryWallet = groupWallets.reduce(
-    (
-      oldest: (typeof groupWallets)[number],
-      wallet: (typeof groupWallets)[number]
-    ) => {
-    return wallet.createdAt < oldest.createdAt ? wallet : oldest;
-    },
-    groupWallets[0]
-  );
-
-  const lockKey = `wallet-group:${walletGroupId}`;
-
-  return withPgAdvisoryLock(lockKey, async () => {
-    const broadcasting = await prisma.transaction.findMany({
-      where: {
-        status: "BROADCASTING",
-        txHash: { not: null },
-        wallet: { walletGroupId },
-      },
-      orderBy: { createdAt: "asc" },
-      take: 500,
-      include: { wallet: true },
-    });
-
-    let reconciledCount = 0;
-    for (const txRecord of broadcasting) {
-      try {
-        const reconciled = await reconcileBroadcastingRecord(
-          txRecord as BroadcastingTxRecord
-        );
-        if (reconciled) reconciledCount += 1;
-      } catch (err) {
-        console.error(
-          `Failed to reconcile transaction ${txRecord.id} (${txRecord.txHash}) for wallet group ${walletGroupId}:`,
-          err
-        );
-      }
-    }
-
-    const depositSync = await detectDepositsForSharedKeyWallet({
-      walletGroupId,
-      id: primaryWallet.id,
-      address: walletGroup.address,
-      lastSyncBlock: walletGroup.lastSyncBlock,
-    });
-
-    const refreshedWalletGroup = await getWalletGroupById(walletGroupId, userId);
-
-    return {
-      walletGroup: refreshedWalletGroup,
-      primaryWalletId: primaryWallet.id,
-      reconciledCount,
-      depositSync,
-    };
-  });
 }
 
 export async function internalTransfer(
@@ -994,11 +880,7 @@ export async function internalTransfer(
       transferAsset.type === "NATIVE"
         ? ethers.parseEther(amount)
         : ethers.parseUnits(amount, transferAsset.decimals);
-    const fromBalance = await getWalletAssetBalance(
-      fromWalletId,
-      transferAsset.id,
-      tx
-    );
+    const fromBalance = await getWalletAssetBalance(fromWalletId, transferAsset.id, tx);
 
     if (fromBalance < parsedAmount) {
       throw new Error("Insufficient balance in source wallet");
@@ -1057,18 +939,6 @@ export async function getWalletTransactions(walletId: string, userId: string) {
   const wallet = await getAccessibleWallet(walletId, userId);
   if (!wallet) {
     throw new Error("Wallet not found");
-  }
-
-  return prisma.transaction.findMany({
-    where: { walletId },
-    orderBy: { createdAt: "desc" },
-  });
-}
-
-export async function getConnectedWalletTransactions(walletId: string) {
-  const wallet = await getNonCustodialWalletById(walletId);
-  if (!wallet) {
-    throw new Error("Connected wallet not found");
   }
 
   return prisma.transaction.findMany({

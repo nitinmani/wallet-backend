@@ -1,6 +1,7 @@
 import { ethers } from "ethers";
 import { provider } from "../lib/provider";
 import { prisma } from "../lib/prisma";
+import { withPgAdvisoryLock } from "../lib/pgLock";
 import {
   ensureErc20Asset,
   ensureNativeAsset,
@@ -9,8 +10,10 @@ import {
 } from "./assetService";
 import { getAccessibleWallet } from "./walletService";
 
-const MAX_BLOCKS_PER_WALLET_PER_RUN = 25;
-const MAX_BLOCKS_PER_MANUAL_SYNC = 250;
+const MAX_BLOCKS_PER_WALLET_PER_RUN = 150;
+const MAX_BLOCKS_PER_MANUAL_SYNC = 500;
+const MAX_MANUAL_SYNC_STEPS = 20;
+const BLOCK_FETCH_BATCH_SIZE = 20;
 const MAX_BLOCK_FETCH_RETRIES = 3;
 const RETRY_BASE_DELAY_MS = 500;
 
@@ -208,109 +211,142 @@ async function processWalletDeposits(
   const toBlock = Math.min(currentBlock, fromBlock + maxBlocks - 1);
   let depositsFound = 0;
   let depositedAmount = 0n;
+  // Collect ERC20 credits to apply under the advisory lock at the end.
+  type Erc20Credit = { tokenAddress: string; symbol: string; decimals: number; amount: bigint };
+  const pendingErc20Credits: Erc20Credit[] = [];
 
-  for (let blockNumber = fromBlock; blockNumber <= toBlock; blockNumber++) {
-    const transactions = await getBlockTransactions(blockNumber, cache);
-    if (transactions.length === 0) continue;
+  for (
+    let batchStart = fromBlock;
+    batchStart <= toBlock;
+    batchStart += BLOCK_FETCH_BATCH_SIZE
+  ) {
+    const batchEnd = Math.min(toBlock, batchStart + BLOCK_FETCH_BATCH_SIZE - 1);
+    const blockNumbers: number[] = [];
+    for (let n = batchStart; n <= batchEnd; n++) {
+      blockNumbers.push(n);
+    }
 
-    for (const tx of transactions) {
-      const txHash = tx.hash || null;
-      if (!txHash) continue;
+    const blockTxEntries = await Promise.all(
+      blockNumbers.map(async (blockNumber) => {
+        const transactions = await getBlockTransactions(blockNumber, cache);
+        return { blockNumber, transactions };
+      })
+    );
 
-      const toAddress = tx.to?.toLowerCase();
-      const walletAddress = wallet.address.toLowerCase();
+    for (const { transactions } of blockTxEntries) {
+      if (transactions.length === 0) continue;
 
-      // Native ETH deposit
-      if (toAddress === walletAddress) {
-        const value = normalizeValue(tx.value);
-        if (value > 0n) {
-          const existingNative = await prisma.transaction.findFirst({
-            where: {
-              txHash,
-              walletId: wallet.id,
-              assetType: "NATIVE",
-            },
-          });
+      for (const tx of transactions) {
+        const txHash = tx.hash || null;
+        if (!txHash) continue;
 
-          if (!existingNative) {
-            await prisma.transaction.create({
-              data: {
-                walletId: wallet.id,
-                type: "DEPOSIT",
-                assetType: "NATIVE",
-                assetSymbol: "ETH",
-                from: tx.from || null,
-                to: tx.to || null,
-                amount: value.toString(),
+        const toAddress = tx.to?.toLowerCase();
+        const walletAddress = wallet.address.toLowerCase();
+
+        // Native ETH deposit
+        if (toAddress === walletAddress) {
+          const value = normalizeValue(tx.value);
+          if (value > 0n) {
+            const existingNative = await prisma.transaction.findFirst({
+              where: {
                 txHash,
-                status: "CONFIRMED",
+                walletId: wallet.id,
+                assetType: "NATIVE",
               },
             });
-            depositsFound += 1;
-            depositedAmount += value;
-            console.log(`Deposit detected: ${txHash} -> ${wallet.address}`);
+
+            if (!existingNative) {
+              await prisma.transaction.create({
+                data: {
+                  walletId: wallet.id,
+                  type: "DEPOSIT",
+                  assetType: "NATIVE",
+                  assetSymbol: "ETH",
+                  from: tx.from || null,
+                  to: tx.to || null,
+                  amount: value.toString(),
+                  txHash,
+                  status: "CONFIRMED",
+                },
+              });
+              depositsFound += 1;
+              depositedAmount += value;
+              console.log(`Deposit detected: ${txHash} -> ${wallet.address}`);
+            }
           }
         }
-      }
 
-      // ERC-20 transfer deposit (supports assets like USDC on Sepolia)
-      if (!toAddress) continue;
-      const decodedTransfer = decodeErc20Transfer(tx);
-      if (!decodedTransfer) continue;
-      if (decodedTransfer.to !== walletAddress) continue;
+        // ERC-20 transfer deposit (supports assets like USDC on Sepolia)
+        if (!toAddress) continue;
+        const decodedTransfer = decodeErc20Transfer(tx);
+        if (!decodedTransfer) continue;
+        if (decodedTransfer.to !== walletAddress) continue;
 
-      const existingToken = await prisma.transaction.findFirst({
-        where: {
-          txHash,
-          walletId: wallet.id,
-          assetType: "ERC20",
-          tokenAddress: tx.to || null,
-        },
-      });
-      if (existingToken) continue;
+        const existingToken = await prisma.transaction.findFirst({
+          where: {
+            txHash,
+            walletId: wallet.id,
+            assetType: "ERC20",
+            tokenAddress: tx.to || null,
+          },
+        });
+        if (existingToken) continue;
 
-      const tokenMetadata = await getTokenMetadata(toAddress, tokenMetadataCache);
-      await prisma.transaction.create({
-        data: {
-          walletId: wallet.id,
-          type: "DEPOSIT",
-          assetType: "ERC20",
-          assetSymbol: tokenMetadata.symbol,
-          tokenAddress: tx.to,
-          tokenDecimals: tokenMetadata.decimals,
-          from: tx.from || null,
-          to: decodedTransfer.to,
-          amount: decodedTransfer.amount.toString(),
-          txHash,
-          status: "CONFIRMED",
-        },
-      });
+        const tokenMetadata = await getTokenMetadata(toAddress, tokenMetadataCache);
+        await prisma.transaction.create({
+          data: {
+            walletId: wallet.id,
+            type: "DEPOSIT",
+            assetType: "ERC20",
+            assetSymbol: tokenMetadata.symbol,
+            tokenAddress: tx.to,
+            tokenDecimals: tokenMetadata.decimals,
+            from: tx.from || null,
+            to: decodedTransfer.to,
+            amount: decodedTransfer.amount.toString(),
+            txHash,
+            status: "CONFIRMED",
+          },
+        });
 
-      if (options?.creditWalletBalance && tx.to) {
-        const tokenAsset = await ensureErc20Asset(
-          tx.to,
-          tokenMetadata.symbol,
-          tokenMetadata.decimals
+        if (options?.creditWalletBalance && tx.to) {
+          pendingErc20Credits.push({
+            tokenAddress: tx.to,
+            symbol: tokenMetadata.symbol,
+            decimals: tokenMetadata.decimals,
+            amount: decodedTransfer.amount,
+          });
+        }
+
+        depositsFound += 1;
+        console.log(
+          `Token deposit detected: ${txHash} -> ${wallet.address} ${tokenMetadata.symbol}`
         );
-        const currentTokenBalance = await getWalletAssetBalance(wallet.id, tokenAsset.id);
-        await setWalletAssetBalance(
-          wallet.id,
-          tokenAsset.id,
-          currentTokenBalance + decodedTransfer.amount
-        );
       }
-
-      depositsFound += 1;
-      console.log(
-        `Token deposit detected: ${txHash} -> ${wallet.address} ${tokenMetadata.symbol}`
-      );
     }
   }
 
-  if (options?.creditWalletBalance && depositedAmount > 0n) {
-    const nativeAsset = await ensureNativeAsset();
-    const currentNative = await getWalletAssetBalance(wallet.id, nativeAsset.id);
-    await setWalletAssetBalance(wallet.id, nativeAsset.id, currentNative + depositedAmount);
+  // Apply all balance credits atomically under the advisory lock so they don't
+  // race with concurrent sends or reconciliation runs.
+  if (options?.creditWalletBalance && (depositedAmount > 0n || pendingErc20Credits.length > 0)) {
+    const lockKey = `wallet-group:${wallet.walletGroupId}`;
+    await withPgAdvisoryLock(lockKey, async (lockTx) => {
+      if (depositedAmount > 0n) {
+        const nativeAsset = await ensureNativeAsset(lockTx);
+        const currentNative = await getWalletAssetBalance(wallet.id, nativeAsset.id, lockTx);
+        await setWalletAssetBalance(wallet.id, nativeAsset.id, currentNative + depositedAmount, lockTx);
+      }
+      for (const credit of pendingErc20Credits) {
+        const tokenAsset = await ensureErc20Asset(
+          credit.tokenAddress,
+          credit.symbol,
+          credit.decimals,
+          lockTx
+        );
+        const currentToken = await getWalletAssetBalance(wallet.id, tokenAsset.id, lockTx);
+        await setWalletAssetBalance(wallet.id, tokenAsset.id, currentToken + credit.amount, lockTx);
+      }
+    });
   }
 
   await prisma.walletGroup.update({
@@ -425,6 +461,38 @@ export async function detectDepositsForWallet(walletId: string, userId: string) 
     ...result,
     currentBlock,
     partial: (result.scannedToBlock ?? currentBlock) < currentBlock,
+  };
+}
+
+export async function syncAllDepositsForWallet(walletId: string, userId: string) {
+  let totalDeposits = 0;
+  let totalAmount = 0n;
+  let currentBlock = 0;
+  let scannedToBlock: number | null = null;
+  let partial = false;
+  let steps = 0;
+
+  for (let i = 0; i < MAX_MANUAL_SYNC_STEPS; i++) {
+    const step = await detectDepositsForWallet(walletId, userId);
+    steps += 1;
+    totalDeposits += step.depositsFound;
+    totalAmount += BigInt(step.depositedAmount);
+    currentBlock = step.currentBlock;
+    scannedToBlock = step.scannedToBlock;
+    partial = step.partial;
+
+    if (!step.partial) {
+      break;
+    }
+  }
+
+  return {
+    currentBlock,
+    scannedToBlock,
+    depositsFound: totalDeposits,
+    depositedAmount: totalAmount.toString(),
+    partial,
+    steps,
   };
 }
 

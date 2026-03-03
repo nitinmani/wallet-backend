@@ -13,27 +13,6 @@ interface Wallet {
   name: string;
   address: string;
   balance: string;
-  walletGroupId: string | null;
-  walletGroup?: {
-    id: string;
-    name: string;
-    custodyType?: "CUSTODIAL" | "NON_CUSTODIAL";
-  } | null;
-}
-
-interface Transaction {
-  id: string;
-  type: string;
-  assetType: "NATIVE" | "ERC20";
-  assetSymbol: string;
-  tokenAddress: string | null;
-  tokenDecimals: number | null;
-  to: string | null;
-  from: string | null;
-  amount: string;
-  txHash: string | null;
-  status: string;
-  createdAt: string;
 }
 
 interface WalletAsset {
@@ -46,42 +25,12 @@ interface WalletAsset {
   formatted: string;
 }
 
-const statusColor: Record<string, string> = {
-  PENDING: "text-yellow-400",
-  BROADCASTING: "text-blue-300",
-  CONFIRMED: "text-green-400",
-  FAILED: "text-red-400",
-};
-
 function formatBalance(wei: string): string {
   try {
-    return (Number(wei) / 1e18).toFixed(6);
+    return ethers.formatEther(wei);
   } catch {
-    return "0.000000";
+    return "0";
   }
-}
-
-function formatUnits(amount: string, decimals: number): string {
-  try {
-    const value = BigInt(amount);
-    const base = BigInt(10) ** BigInt(decimals);
-    const whole = value / base;
-    const fraction = (value % base)
-      .toString()
-      .padStart(decimals, "0")
-      .slice(0, 6)
-      .replace(/0+$/, "");
-    return fraction ? `${whole}.${fraction}` : whole.toString();
-  } catch {
-    return amount;
-  }
-}
-
-function formatTransactionAmount(tx: Transaction): string {
-  if (tx.assetType === "ERC20") {
-    return `${formatUnits(tx.amount, tx.tokenDecimals ?? 18)} ${tx.assetSymbol || "ERC20"}`;
-  }
-  return `${formatBalance(tx.amount)} ETH`;
 }
 
 function getSepoliaAddressUrl(address: string): string {
@@ -101,20 +50,99 @@ function truncateAddress(addr: string): string {
   return `${addr.slice(0, 6)}...${addr.slice(-4)}`;
 }
 
+function hasPositiveBalance(balance: string): boolean {
+  try {
+    return BigInt(balance) > BigInt(0);
+  } catch {
+    return false;
+  }
+}
+
 function isLikelyEthAddress(value: string): boolean {
   return /^0x[a-fA-F0-9]{40}$/.test(value.trim());
 }
 
-function parseJsonArrayInput(rawValue: string, fieldName: string): unknown[] {
-  try {
-    const parsed = JSON.parse(rawValue);
-    if (!Array.isArray(parsed)) {
-      throw new Error();
-    }
-    return parsed;
-  } catch {
-    throw new Error(`${fieldName} must be a valid JSON array`);
+interface AbiInputParam {
+  name?: string;
+  type?: string;
+}
+
+interface AbiFunctionOption {
+  key: string;
+  label: string;
+  inputs: AbiInputParam[];
+}
+
+function parseAbiFunctionOptions(
+  abi: unknown[],
+  mode: "read" | "write"
+): AbiFunctionOption[] {
+  const options: AbiFunctionOption[] = [];
+
+  for (const entry of abi) {
+    if (!entry || typeof entry !== "object") continue;
+    const record = entry as Record<string, unknown>;
+    if (record.type !== "function" || typeof record.name !== "string") continue;
+
+    const stateMutability =
+      typeof record.stateMutability === "string" ? record.stateMutability : "nonpayable";
+    const isRead = stateMutability === "view" || stateMutability === "pure";
+    if (mode === "read" && !isRead) continue;
+    if (mode === "write" && isRead) continue;
+
+    const inputs = Array.isArray(record.inputs)
+      ? record.inputs
+          .filter((input) => input && typeof input === "object")
+          .map((input) => {
+            const typedInput = input as Record<string, unknown>;
+            return {
+              name: typeof typedInput.name === "string" ? typedInput.name : undefined,
+              type: typeof typedInput.type === "string" ? typedInput.type : undefined,
+            };
+          })
+      : [];
+
+    const signature = `${record.name}(${inputs
+      .map((input) => input.type || "unknown")
+      .join(",")})`;
+    const label = `${record.name}(${inputs
+      .map((input, index) => `${input.name || `arg${index + 1}`}: ${input.type || "unknown"}`)
+      .join(", ")})`;
+
+    options.push({ key: signature, label, inputs });
   }
+
+  return options;
+}
+
+function toContractArgValue(raw: string, inputType?: string): unknown {
+  const normalizedType = (inputType || "").trim().toLowerCase();
+  const trimmed = raw.trim();
+
+  if (!normalizedType) return raw;
+
+  if (normalizedType.endsWith("[]") || normalizedType.startsWith("tuple")) {
+    try {
+      return JSON.parse(raw);
+    } catch {
+      throw new Error(`Argument (${inputType}) must be valid JSON`);
+    }
+  }
+
+  if (normalizedType === "bool") {
+    if (trimmed.toLowerCase() === "true") return true;
+    if (trimmed.toLowerCase() === "false") return false;
+    throw new Error("Boolean argument must be true or false");
+  }
+
+  if (normalizedType.startsWith("uint") || normalizedType.startsWith("int")) {
+    if (!trimmed) {
+      throw new Error(`Argument (${inputType}) cannot be empty`);
+    }
+    return trimmed;
+  }
+
+  return raw;
 }
 
 function toSerializable(value: unknown): unknown {
@@ -166,7 +194,6 @@ async function getInjectedSigner(expectedAddress?: string) {
 export default function ConnectedWalletPage() {
   const router = useRouter();
   const [wallet, setWallet] = useState<Wallet | null>(null);
-  const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [walletAssets, setWalletAssets] = useState<WalletAsset[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -182,18 +209,20 @@ export default function ConnectedWalletPage() {
   const [sendingAsset, setSendingAsset] = useState(false);
 
   const [readContractAddress, setReadContractAddress] = useState("");
-  const [readAbi, setReadAbi] = useState(`["function symbol() view returns (string)"]`);
-  const [readMethod, setReadMethod] = useState("symbol");
-  const [readArgs, setReadArgs] = useState("[]");
+  const [readAbi, setReadAbi] = useState<unknown[]>([]);
+  const [readFunctions, setReadFunctions] = useState<AbiFunctionOption[]>([]);
+  const [selectedReadFunction, setSelectedReadFunction] = useState("");
+  const [readArgValues, setReadArgValues] = useState<string[]>([]);
+  const [loadingReadAbi, setLoadingReadAbi] = useState(false);
   const [readResult, setReadResult] = useState("");
   const [readingContract, setReadingContract] = useState(false);
 
   const [writeContractAddress, setWriteContractAddress] = useState("");
-  const [writeAbi, setWriteAbi] = useState(
-    `["function transfer(address to, uint256 amount) returns (bool)"]`
-  );
-  const [writeMethod, setWriteMethod] = useState("transfer");
-  const [writeArgs, setWriteArgs] = useState("[]");
+  const [writeAbi, setWriteAbi] = useState<unknown[]>([]);
+  const [writeFunctions, setWriteFunctions] = useState<AbiFunctionOption[]>([]);
+  const [selectedWriteFunction, setSelectedWriteFunction] = useState("");
+  const [writeArgValues, setWriteArgValues] = useState<string[]>([]);
+  const [loadingWriteAbi, setLoadingWriteAbi] = useState(false);
   const [writeValueEth, setWriteValueEth] = useState("");
   const [writeResult, setWriteResult] = useState("");
   const [writingContract, setWritingContract] = useState(false);
@@ -201,6 +230,13 @@ export default function ConnectedWalletPage() {
   const [syncing, setSyncing] = useState(false);
   const [syncResult, setSyncResult] = useState("");
   const [error, setError] = useState("");
+
+  function normalizeSelectedAsset(assets: WalletAsset[], preferred: string) {
+    const visibleAssets = assets.filter((asset) => hasPositiveBalance(asset.balance));
+    if (visibleAssets.some((asset) => asset.assetId === preferred)) return preferred;
+    const native = visibleAssets.find((asset) => asset.type === "NATIVE");
+    return native?.assetId || visibleAssets[0]?.assetId || "";
+  }
 
   async function load() {
     try {
@@ -210,21 +246,13 @@ export default function ConnectedWalletPage() {
         return;
       }
 
-      const [me, txs, assets] = await Promise.all([
+      const [me, assets] = await Promise.all([
         api.connectedWalletGetMe(),
-        api.connectedWalletGetTransactions(),
         api.connectedWalletGetAssets(),
       ]);
       setWallet(me);
-      setTransactions(txs);
       setWalletAssets(assets);
-      setSelectedSendAssetId((prev) => {
-        if (assets.some((asset: WalletAsset) => asset.assetId === prev)) {
-          return prev;
-        }
-        const native = assets.find((asset: WalletAsset) => asset.type === "NATIVE");
-        return native?.assetId || assets[0]?.assetId || "";
-      });
+      setSelectedSendAssetId((prev) => normalizeSelectedAsset(assets, prev));
     } catch (err: any) {
       localStorage.removeItem(CONNECTED_WALLET_TOKEN_KEY);
       localStorage.removeItem("vencura_connected_wallet_address");
@@ -318,7 +346,6 @@ export default function ConnectedWalletPage() {
     try {
       const { signer } = await getInjectedSigner(wallet.address);
       let txHash = "";
-      let nonce: number | undefined = undefined;
 
       if (selectedAsset.type === "NATIVE") {
         const tx = await signer.sendTransaction({
@@ -326,7 +353,6 @@ export default function ConnectedWalletPage() {
           value: ethers.parseEther(sendAmount),
         });
         txHash = tx.hash;
-        nonce = tx.nonce;
       } else {
         if (!selectedAsset.contractAddress) {
           throw new Error("Selected token is missing contract address");
@@ -339,16 +365,8 @@ export default function ConnectedWalletPage() {
         const amountUnits = ethers.parseUnits(sendAmount, selectedAsset.decimals);
         const tx = await token.transfer(sendTo, amountUnits);
         txHash = tx.hash;
-        nonce = tx.nonce;
       }
 
-      await api.connectedWalletRegisterTx(
-        txHash,
-        sendAmount,
-        sendTo,
-        selectedSendAssetId,
-        nonce
-      );
       setSendResult(txHash);
       await load();
     } catch (err: any) {
@@ -358,20 +376,84 @@ export default function ConnectedWalletPage() {
     }
   }
 
-  async function handleManualSync() {
+  async function handleRefreshBalances() {
     setError("");
     setSyncResult("");
     setSyncing(true);
     try {
       const result = await api.connectedWalletSync();
-      setSyncResult(
-        `Synced. Reconciled ${result.reconciledCount} withdrawal(s), found ${result.depositSync.depositsFound} deposit(s).`
+      setWallet(result.wallet);
+      setWalletAssets(result.assets || []);
+      setSelectedSendAssetId((prev) =>
+        normalizeSelectedAsset(result.assets || [], prev)
       );
-      await load();
+      setSyncResult("Balances refreshed.");
     } catch (err: any) {
       setError(err.message);
     } finally {
       setSyncing(false);
+    }
+  }
+
+  function handleReadFunctionSelection(signature: string, options = readFunctions) {
+    setSelectedReadFunction(signature);
+    const selected = options.find((option) => option.key === signature);
+    setReadArgValues(new Array(selected?.inputs.length || 0).fill(""));
+  }
+
+  function handleWriteFunctionSelection(signature: string, options = writeFunctions) {
+    setSelectedWriteFunction(signature);
+    const selected = options.find((option) => option.key === signature);
+    setWriteArgValues(new Array(selected?.inputs.length || 0).fill(""));
+  }
+
+  async function handleLoadReadAbi() {
+    setError("");
+    setReadResult("");
+    setLoadingReadAbi(true);
+    try {
+      if (!isLikelyEthAddress(readContractAddress)) {
+        throw new Error("Enter a valid contract address");
+      }
+
+      const { abi } = await api.connectedWalletGetContractAbi(readContractAddress.trim());
+      const readOptions = parseAbiFunctionOptions(abi, "read");
+      if (!readOptions.length) {
+        throw new Error("No read functions found in ABI");
+      }
+
+      setReadAbi(abi);
+      setReadFunctions(readOptions);
+      handleReadFunctionSelection(readOptions[0].key, readOptions);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setLoadingReadAbi(false);
+    }
+  }
+
+  async function handleLoadWriteAbi() {
+    setError("");
+    setWriteResult("");
+    setLoadingWriteAbi(true);
+    try {
+      if (!isLikelyEthAddress(writeContractAddress)) {
+        throw new Error("Enter a valid contract address");
+      }
+
+      const { abi } = await api.connectedWalletGetContractAbi(writeContractAddress.trim());
+      const writeOptions = parseAbiFunctionOptions(abi, "write");
+      if (!writeOptions.length) {
+        throw new Error("No write functions found in ABI");
+      }
+
+      setWriteAbi(abi);
+      setWriteFunctions(writeOptions);
+      handleWriteFunctionSelection(writeOptions[0].key, writeOptions);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setLoadingWriteAbi(false);
     }
   }
 
@@ -383,22 +465,29 @@ export default function ConnectedWalletPage() {
       if (!isLikelyEthAddress(readContractAddress)) {
         throw new Error("Enter a valid contract address");
       }
-      const method = readMethod.trim();
-      if (!method) {
-        throw new Error("Method is required");
+      if (!selectedReadFunction) {
+        throw new Error("Load ABI and select a function");
+      }
+      if (!readAbi.length) {
+        throw new Error("Load ABI first");
+      }
+      const selected = readFunctions.find((option) => option.key === selectedReadFunction);
+      if (!selected) {
+        throw new Error("Selected read function not found");
       }
 
-      const abi = parseJsonArrayInput(readAbi, "ABI");
-      const args = parseJsonArrayInput(readArgs, "Args");
+      const args = selected.inputs.map((input, index) =>
+        toContractArgValue(readArgValues[index] || "", input.type)
+      );
       const { provider } = await getInjectedSigner(wallet?.address);
       const contract = new ethers.Contract(
         readContractAddress.trim(),
-        abi as ethers.InterfaceAbi,
+        readAbi as ethers.InterfaceAbi,
         provider
       );
-      const fn = (contract as any)[method];
+      const fn = (contract as any)[selectedReadFunction];
       if (!fn || typeof fn !== "function") {
-        throw new Error(`Method not found in ABI: ${method}`);
+        throw new Error(`Method not found in ABI: ${selectedReadFunction}`);
       }
       const result = await fn.staticCall(...args);
       setReadResult(JSON.stringify(toSerializable(result), null, 2));
@@ -420,36 +509,34 @@ export default function ConnectedWalletPage() {
       if (!isLikelyEthAddress(writeContractAddress)) {
         throw new Error("Enter a valid contract address");
       }
-      const method = writeMethod.trim();
-      if (!method) {
-        throw new Error("Method is required");
+      if (!selectedWriteFunction) {
+        throw new Error("Load ABI and select a function");
+      }
+      if (!writeAbi.length) {
+        throw new Error("Load ABI first");
+      }
+      const selected = writeFunctions.find((option) => option.key === selectedWriteFunction);
+      if (!selected) {
+        throw new Error("Selected write function not found");
       }
 
-      const abi = parseJsonArrayInput(writeAbi, "ABI");
-      const args = parseJsonArrayInput(writeArgs, "Args");
+      const args = selected.inputs.map((input, index) =>
+        toContractArgValue(writeArgValues[index] || "", input.type)
+      );
       const { signer } = await getInjectedSigner(wallet.address);
       const contract = new ethers.Contract(
         writeContractAddress.trim(),
-        abi as ethers.InterfaceAbi,
+        writeAbi as ethers.InterfaceAbi,
         signer
       );
-      const fn = (contract as any)[method];
+      const fn = (contract as any)[selectedWriteFunction];
       if (!fn || typeof fn !== "function") {
-        throw new Error(`Method not found in ABI: ${method}`);
+        throw new Error(`Method not found in ABI: ${selectedWriteFunction}`);
       }
 
       const tx = await fn(
         ...args,
         writeValueEth.trim() ? { value: ethers.parseEther(writeValueEth.trim()) } : {}
-      );
-
-      const nativeAsset = walletAssets.find((asset) => asset.type === "NATIVE");
-      await api.connectedWalletRegisterTx(
-        tx.hash,
-        writeValueEth.trim() || "0",
-        writeContractAddress.trim(),
-        nativeAsset?.assetId,
-        tx.nonce
       );
 
       setWriteResult(tx.hash);
@@ -464,9 +551,12 @@ export default function ConnectedWalletPage() {
   if (loading) return <p className="text-gray-400 mt-10">Loading...</p>;
   if (!wallet) return <p className="text-red-400 mt-10">Connected wallet not found</p>;
 
+  const visibleWalletAssets = walletAssets.filter((asset) =>
+    hasPositiveBalance(asset.balance)
+  );
   const selectedSendAsset =
-    walletAssets.find((asset) => asset.assetId === selectedSendAssetId) || null;
-  const tokenAssets = walletAssets.filter((asset) => asset.type === "ERC20");
+    visibleWalletAssets.find((asset) => asset.assetId === selectedSendAssetId) || null;
+  const tokenAssets = visibleWalletAssets.filter((asset) => asset.type === "ERC20");
 
   return (
     <div>
@@ -489,11 +579,11 @@ export default function ConnectedWalletPage() {
         <div className="flex items-center justify-between gap-3 mb-4 flex-wrap">
           <h1 className="text-2xl font-bold">{wallet.name}</h1>
           <button
-            onClick={handleManualSync}
+            onClick={handleRefreshBalances}
             disabled={syncing}
             className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 rounded-lg text-xs font-medium transition disabled:opacity-50"
           >
-            {syncing ? "Syncing..." : "Sync Now"}
+            {syncing ? "Refreshing..." : "Refresh Balances"}
           </button>
         </div>
         <a
@@ -510,7 +600,7 @@ export default function ConnectedWalletPage() {
         <div className="mt-4 p-3 bg-gray-800/50 border border-gray-700 rounded-lg">
           <p className="text-xs text-gray-400 mb-2">Tracked Token Balances</p>
           {tokenAssets.length === 0 ? (
-            <p className="text-xs text-gray-500">No ERC-20 balances tracked yet.</p>
+            <p className="text-xs text-gray-500">No ERC-20 balances found.</p>
           ) : (
             <div className="space-y-2">
               {tokenAssets.map((asset) => (
@@ -602,10 +692,10 @@ export default function ConnectedWalletPage() {
             }}
             className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm mb-2 focus:outline-none focus:border-blue-500"
           >
-            {walletAssets.length === 0 ? (
+            {visibleWalletAssets.length === 0 ? (
               <option value="">No assets available</option>
             ) : (
-              walletAssets.map((asset) => (
+              visibleWalletAssets.map((asset) => (
                 <option key={asset.assetId} value={asset.assetId}>
                   {asset.symbol} ({asset.formatted})
                 </option>
@@ -641,7 +731,9 @@ export default function ConnectedWalletPage() {
             {sendingAsset ? "Sending..." : "Send"}
           </button>
           {sendMaxHint && (
-            <div className="mt-3 p-2 bg-gray-800 rounded text-xs text-gray-300">{sendMaxHint}</div>
+            <div className="mt-3 p-2 bg-gray-800 rounded text-xs text-gray-300">
+              {sendMaxHint}
+            </div>
           )}
           {sendResult && (
             <div className="mt-3 p-2 bg-gray-800 rounded text-xs font-mono break-all">
@@ -661,37 +753,65 @@ export default function ConnectedWalletPage() {
         <div className="p-4 bg-gray-900 border border-gray-800 rounded-lg">
           <h2 className="font-semibold mb-3">Contract Read</h2>
           <p className="text-xs text-gray-500 mb-2">View/pure calls only (no transaction).</p>
-          <input
-            type="text"
-            value={readContractAddress}
-            onChange={(e) => setReadContractAddress(e.target.value)}
-            placeholder="Contract address (0x...)"
+          <div className="flex gap-2 mb-2">
+            <input
+              type="text"
+              value={readContractAddress}
+              onChange={(e) => {
+                setReadContractAddress(e.target.value);
+                setReadFunctions([]);
+                setSelectedReadFunction("");
+                setReadArgValues([]);
+                setReadResult("");
+              }}
+              placeholder="Contract address (0x...)"
+              className="flex-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm focus:outline-none focus:border-blue-500"
+            />
+            <button
+              onClick={handleLoadReadAbi}
+              disabled={loadingReadAbi}
+              className="px-3 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-sm font-medium transition disabled:opacity-50"
+            >
+              {loadingReadAbi ? "Loading..." : "Load ABI"}
+            </button>
+          </div>
+          <select
+            value={selectedReadFunction}
+            onChange={(e) => handleReadFunctionSelection(e.target.value)}
+            disabled={readFunctions.length === 0}
             className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm mb-2 focus:outline-none focus:border-blue-500"
-          />
-          <input
-            type="text"
-            value={readMethod}
-            onChange={(e) => setReadMethod(e.target.value)}
-            placeholder="Method (e.g. symbol)"
-            className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm mb-2 focus:outline-none focus:border-blue-500"
-          />
-          <textarea
-            value={readAbi}
-            onChange={(e) => setReadAbi(e.target.value)}
-            placeholder='ABI JSON array, e.g. ["function symbol() view returns (string)"]'
-            rows={3}
-            className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-xs font-mono mb-2 focus:outline-none focus:border-blue-500"
-          />
-          <textarea
-            value={readArgs}
-            onChange={(e) => setReadArgs(e.target.value)}
-            placeholder='Args JSON array, e.g. [] or ["0x..."]'
-            rows={2}
-            className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-xs font-mono mb-2 focus:outline-none focus:border-blue-500"
-          />
+          >
+            {readFunctions.length === 0 ? (
+              <option value="">Load ABI to choose a read function</option>
+            ) : (
+              readFunctions.map((fn) => (
+                <option key={fn.key} value={fn.key}>
+                  {fn.label}
+                </option>
+              ))
+            )}
+          </select>
+          {(readFunctions.find((fn) => fn.key === selectedReadFunction)?.inputs || []).map(
+            (input, index) => (
+              <input
+                key={`${selectedReadFunction}-arg-${index}`}
+                type="text"
+                value={readArgValues[index] || ""}
+                onChange={(e) =>
+                  setReadArgValues((prev) => {
+                    const next = [...prev];
+                    next[index] = e.target.value;
+                    return next;
+                  })
+                }
+                placeholder={`${input.name || `arg${index + 1}`} (${input.type || "unknown"})`}
+                className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm mb-2 focus:outline-none focus:border-blue-500"
+              />
+            )
+          )}
           <button
             onClick={handleContractRead}
-            disabled={readingContract}
+            disabled={readingContract || !selectedReadFunction}
             className="px-4 py-2 bg-cyan-600 hover:bg-cyan-700 rounded-lg text-sm font-medium transition disabled:opacity-50"
           >
             {readingContract ? "Reading..." : "Read Contract"}
@@ -708,34 +828,62 @@ export default function ConnectedWalletPage() {
           <p className="text-xs text-gray-500 mb-2">
             Sends a signed transaction from your connected wallet.
           </p>
-          <input
-            type="text"
-            value={writeContractAddress}
-            onChange={(e) => setWriteContractAddress(e.target.value)}
-            placeholder="Contract address (0x...)"
+          <div className="flex gap-2 mb-2">
+            <input
+              type="text"
+              value={writeContractAddress}
+              onChange={(e) => {
+                setWriteContractAddress(e.target.value);
+                setWriteFunctions([]);
+                setSelectedWriteFunction("");
+                setWriteArgValues([]);
+                setWriteResult("");
+              }}
+              placeholder="Contract address (0x...)"
+              className="flex-1 px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm focus:outline-none focus:border-blue-500"
+            />
+            <button
+              onClick={handleLoadWriteAbi}
+              disabled={loadingWriteAbi}
+              className="px-3 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-sm font-medium transition disabled:opacity-50"
+            >
+              {loadingWriteAbi ? "Loading..." : "Load ABI"}
+            </button>
+          </div>
+          <select
+            value={selectedWriteFunction}
+            onChange={(e) => handleWriteFunctionSelection(e.target.value)}
+            disabled={writeFunctions.length === 0}
             className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm mb-2 focus:outline-none focus:border-blue-500"
-          />
-          <input
-            type="text"
-            value={writeMethod}
-            onChange={(e) => setWriteMethod(e.target.value)}
-            placeholder="Method (e.g. transfer)"
-            className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm mb-2 focus:outline-none focus:border-blue-500"
-          />
-          <textarea
-            value={writeAbi}
-            onChange={(e) => setWriteAbi(e.target.value)}
-            placeholder='ABI JSON array, e.g. ["function transfer(address to, uint256 amount) returns (bool)"]'
-            rows={3}
-            className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-xs font-mono mb-2 focus:outline-none focus:border-blue-500"
-          />
-          <textarea
-            value={writeArgs}
-            onChange={(e) => setWriteArgs(e.target.value)}
-            placeholder='Args JSON array, e.g. ["0xRecipient", "1000000"]'
-            rows={2}
-            className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-xs font-mono mb-2 focus:outline-none focus:border-blue-500"
-          />
+          >
+            {writeFunctions.length === 0 ? (
+              <option value="">Load ABI to choose a write function</option>
+            ) : (
+              writeFunctions.map((fn) => (
+                <option key={fn.key} value={fn.key}>
+                  {fn.label}
+                </option>
+              ))
+            )}
+          </select>
+          {(writeFunctions.find((fn) => fn.key === selectedWriteFunction)?.inputs || []).map(
+            (input, index) => (
+              <input
+                key={`${selectedWriteFunction}-arg-${index}`}
+                type="text"
+                value={writeArgValues[index] || ""}
+                onChange={(e) =>
+                  setWriteArgValues((prev) => {
+                    const next = [...prev];
+                    next[index] = e.target.value;
+                    return next;
+                  })
+                }
+                placeholder={`${input.name || `arg${index + 1}`} (${input.type || "unknown"})`}
+                className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm mb-2 focus:outline-none focus:border-blue-500"
+              />
+            )
+          )}
           <input
             type="text"
             value={writeValueEth}
@@ -745,7 +893,7 @@ export default function ConnectedWalletPage() {
           />
           <button
             onClick={handleContractWrite}
-            disabled={writingContract}
+            disabled={writingContract || !selectedWriteFunction}
             className="px-4 py-2 bg-rose-600 hover:bg-rose-700 rounded-lg text-sm font-medium transition disabled:opacity-50"
           >
             {writingContract ? "Writing..." : "Write Contract"}
@@ -764,69 +912,6 @@ export default function ConnectedWalletPage() {
             </div>
           )}
         </div>
-      </div>
-
-      <div className="p-4 bg-gray-900 border border-gray-800 rounded-lg">
-        <h2 className="font-semibold mb-3">Transaction History</h2>
-        {transactions.length === 0 ? (
-          <p className="text-gray-500 text-sm">No transactions yet.</p>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-gray-400 border-b border-gray-800">
-                  <th className="text-left py-2 pr-4">Type</th>
-                  <th className="text-left py-2 pr-4">Amount</th>
-                  <th className="text-left py-2 pr-4">To/From</th>
-                  <th className="text-left py-2 pr-4">Status</th>
-                  <th className="text-left py-2">Tx Hash</th>
-                </tr>
-              </thead>
-              <tbody>
-                {transactions.map((tx) => (
-                  <tr key={tx.id} className="border-b border-gray-800/50">
-                    <td className="py-2 pr-4">
-                      <span
-                        className={
-                          tx.type === "DEPOSIT"
-                            ? "text-green-400"
-                            : tx.type === "WITHDRAWAL"
-                            ? "text-red-400"
-                            : "text-yellow-400"
-                        }
-                      >
-                        {tx.type}
-                      </span>
-                    </td>
-                    <td className="py-2 pr-4 font-mono">{formatTransactionAmount(tx)}</td>
-                    <td className="py-2 pr-4 font-mono text-gray-400">
-                      {(tx.type === "DEPOSIT" ? tx.from : tx.to)
-                        ? `${(tx.type === "DEPOSIT" ? tx.from : tx.to)!.slice(0, 10)}...`
-                        : "N/A"}
-                    </td>
-                    <td className={`py-2 pr-4 ${statusColor[tx.status] || "text-gray-400"}`}>
-                      {tx.status}
-                    </td>
-                    <td className="py-2 font-mono text-xs text-gray-500">
-                      {tx.txHash ? (
-                        <a
-                          href={getSepoliaTxUrl(tx.txHash)}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="text-blue-300 hover:text-blue-200 hover:underline"
-                        >
-                          {tx.txHash.slice(0, 14)}...
-                        </a>
-                      ) : (
-                        "None"
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
       </div>
     </div>
   );

@@ -10,7 +10,17 @@ const TX_RECONCILE_INTERVAL = 15_000; // 15 seconds
 function isPrismaConnectivityError(err: unknown): boolean {
   if (!err || typeof err !== "object") return false;
   const code = (err as { code?: string }).code;
-  return code === "P1001" || code === "P1002";
+  const name = (err as { name?: string }).name || "";
+  const message = (err as { message?: string }).message || "";
+
+  if (code === "P1001" || code === "P1002") {
+    return true;
+  }
+
+  return (
+    name.includes("PrismaClientInitializationError") &&
+    message.includes("Can't reach database server")
+  );
 }
 
 async function handleCronError(job: string, err: unknown) {

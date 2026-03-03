@@ -1,4 +1,4 @@
-export type TxType = "DEPOSIT" | "WITHDRAWAL" | "INTERNAL";
+export type TxType = "DEPOSIT" | "WITHDRAWAL" | "CONTRACT" | "INTERNAL";
 export type TxStatus = "PENDING" | "BROADCASTING" | "CONFIRMED" | "FAILED";
 
 export interface UserResponse {

@@ -1,21 +1,15 @@
 import { Prisma } from "@prisma/client";
 import { ethers } from "ethers";
 import { prisma } from "../lib/prisma";
-import { provider } from "../lib/provider";
 
-type DbClient = Prisma.TransactionClient | typeof prisma;
+// Sentinel used in the DB for the native ETH asset so the unique constraint
+// on contractAddress works without nullable-NULL gymnastics.
+export const NATIVE_CONTRACT_ADDRESS = "native";
 
 const NATIVE_ASSET_SYMBOL = "ETH";
 const NATIVE_ASSET_DECIMALS = 18;
 
-let cachedChainId: number | null = null;
-
-async function getChainId(): Promise<number> {
-  if (cachedChainId !== null) return cachedChainId;
-  const network = await provider.getNetwork();
-  cachedChainId = Number(network.chainId);
-  return cachedChainId;
-}
+type DbClient = Prisma.TransactionClient | typeof prisma;
 
 function getDb(tx?: Prisma.TransactionClient): DbClient {
   return tx ?? prisma;
@@ -23,33 +17,14 @@ function getDb(tx?: Prisma.TransactionClient): DbClient {
 
 export async function ensureNativeAsset(tx?: Prisma.TransactionClient) {
   const db = getDb(tx);
-  const chainId = await getChainId();
-  const existing = await db.asset.findFirst({
-    where: {
-      chainId,
-      type: "NATIVE",
-      contractAddress: null,
-    },
-  });
-
-  if (existing) {
-    return db.asset.update({
-      where: { id: existing.id },
-      data: {
-        symbol: NATIVE_ASSET_SYMBOL,
-        decimals: NATIVE_ASSET_DECIMALS,
-        type: "NATIVE",
-      },
-    });
-  }
-
-  return db.asset.create({
-    data: {
-      chainId,
+  return db.asset.upsert({
+    where: { contractAddress: NATIVE_CONTRACT_ADDRESS },
+    update: {},
+    create: {
       type: "NATIVE",
       symbol: NATIVE_ASSET_SYMBOL,
       decimals: NATIVE_ASSET_DECIMALS,
-      contractAddress: null,
+      contractAddress: NATIVE_CONTRACT_ADDRESS,
     },
   });
 }
@@ -61,22 +36,11 @@ export async function ensureErc20Asset(
   tx?: Prisma.TransactionClient
 ) {
   const db = getDb(tx);
-  const chainId = await getChainId();
   const normalizedAddress = ethers.getAddress(contractAddress);
   return db.asset.upsert({
-    where: {
-      chainId_contractAddress: {
-        chainId,
-        contractAddress: normalizedAddress,
-      },
-    },
-    update: {
-      type: "ERC20",
-      symbol,
-      decimals,
-    },
+    where: { contractAddress: normalizedAddress },
+    update: { type: "ERC20", symbol, decimals },
     create: {
-      chainId,
       type: "ERC20",
       symbol,
       decimals,

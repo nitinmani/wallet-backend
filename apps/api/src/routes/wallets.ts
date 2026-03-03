@@ -1,5 +1,4 @@
 import { Request, Response, Router } from "express";
-import { syncWalletOnChainState } from "../services/transactionService";
 import {
   createWallet,
   createWalletInWalletGroup,
@@ -59,15 +58,6 @@ walletRoutes.patch("/:walletId", async (req: Request, res: Response) => {
 
     const wallet = await updateWalletName(req.params.walletId, req.user!.id, name);
     res.json(wallet);
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
-  }
-});
-
-walletRoutes.post("/:walletId/sync", async (req: Request, res: Response) => {
-  try {
-    const result = await syncWalletOnChainState(req.params.walletId, req.user!.id);
-    res.json(result);
   } catch (err: any) {
     res.status(400).json({ error: err.message });
   }

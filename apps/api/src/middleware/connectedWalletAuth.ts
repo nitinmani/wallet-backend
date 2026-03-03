@@ -6,7 +6,6 @@ declare global {
     interface Request {
       connectedWallet?: {
         sessionId: string;
-        walletId: string;
         address: string;
       };
     }
@@ -36,7 +35,6 @@ export async function connectedWalletAuthMiddleware(
     const session = await authenticateConnectedWalletSession(token);
     req.connectedWallet = {
       sessionId: session.sessionId,
-      walletId: session.wallet.id,
       address: session.wallet.address,
     };
     next();
