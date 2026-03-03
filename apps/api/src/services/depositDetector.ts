@@ -496,24 +496,3 @@ export async function syncAllDepositsForWallet(walletId: string, userId: string)
   };
 }
 
-export async function detectDepositsForSharedKeyWallet(
-  wallet: WalletSyncRecord
-) {
-  const currentBlock = await getFreshBlockNumber();
-  const cache = new Map<number, ChainTxLike[]>();
-  const tokenMetadataCache = new Map<string, TokenMetadata>();
-  const result = await processWalletDeposits(
-    wallet,
-    currentBlock,
-    MAX_BLOCKS_PER_MANUAL_SYNC,
-    cache,
-    tokenMetadataCache,
-    { creditWalletBalance: true }
-  );
-
-  return {
-    ...result,
-    currentBlock,
-    partial: (result.scannedToBlock ?? currentBlock) < currentBlock,
-  };
-}

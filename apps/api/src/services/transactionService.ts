@@ -3,16 +3,13 @@ import { Prisma } from "@prisma/client";
 import { withPgAdvisoryLock } from "../lib/pgLock";
 import { prisma } from "../lib/prisma";
 import { broadcastSignedTransaction, provider } from "../lib/provider";
+import { estimateGasCost, getNextNonce, getWalletLockKey } from "./txHelpers";
 import {
   ensureErc20Asset,
   ensureNativeAsset,
   getWalletAssetBalance,
   setWalletAssetBalance,
 } from "./assetService";
-import {
-  detectDepositsForWallet,
-  syncAllDepositsForWallet,
-} from "./depositDetector";
 import {
   getAccessibleWallet,
   getWalletSigningContext,
@@ -24,21 +21,6 @@ const ERC20_ABI = [
   "function decimals() view returns (uint8)",
   "function symbol() view returns (string)",
 ];
-
-async function estimateGasCost(
-  gasLimit: bigint,
-  overrideGasPrice?: bigint
-): Promise<{ gasCost: bigint; effectiveGasPrice: bigint }> {
-  if (overrideGasPrice !== undefined) {
-    return {
-      gasCost: gasLimit * overrideGasPrice,
-      effectiveGasPrice: overrideGasPrice,
-    };
-  }
-  const feeData = await provider.getFeeData();
-  const effectiveGasPrice = feeData.maxFeePerGas ?? feeData.gasPrice ?? 0n;
-  return { gasCost: gasLimit * effectiveGasPrice, effectiveGasPrice };
-}
 
 function formatRequiredBalance(amount: bigint, gasCost: bigint) {
   return ethers.formatEther(amount + gasCost);
@@ -55,39 +37,9 @@ function getInsufficientBalanceMessage(
   )} ETH (amount + gas), have ${ethers.formatEther(available)} ETH`;
 }
 
-function getWalletLockKey(walletId: string, walletGroupId: string | null) {
-  return walletGroupId ? `wallet-group:${walletGroupId}` : `wallet:${walletId}`;
-}
-
 function safeSubtract(balance: bigint, amount: bigint): bigint {
   if (amount <= 0n) return balance;
   return amount > balance ? 0n : balance - amount;
-}
-
-async function getNextNonce(
-  tx: Prisma.TransactionClient,
-  fromAddress: string
-): Promise<number> {
-  const chainPendingNonce = await provider.getTransactionCount(fromAddress, "pending");
-  const maxReserved = await tx.transaction.aggregate({
-    where: {
-      from: fromAddress,
-      status: {
-        in: ["PENDING", "BROADCASTING"],
-      },
-      nonce: {
-        not: null,
-      },
-    },
-    _max: { nonce: true },
-  });
-
-  const dbNextNonce =
-    maxReserved._max.nonce === null || maxReserved._max.nonce === undefined
-      ? chainPendingNonce
-      : maxReserved._max.nonce + 1;
-
-  return Math.max(chainPendingNonce, dbNextNonce);
 }
 
 export async function sendTransaction(
@@ -804,28 +756,6 @@ async function reconcileBroadcastingTransactionsForWalletId(
   }
 
   return reconciledCount;
-}
-
-export async function syncWalletOnChainState(walletId: string, userId: string) {
-  const wallet = await getAccessibleWallet(walletId, userId);
-  if (!wallet) {
-    throw new Error("Wallet not found");
-  }
-
-  const reconciledCount = await reconcileBroadcastingTransactionsForWallet(
-    walletId,
-    userId,
-    200
-  );
-
-  const depositSync = await syncAllDepositsForWallet(walletId, userId);
-  const updatedWallet = await getAccessibleWallet(walletId, userId);
-
-  return {
-    wallet: updatedWallet,
-    reconciledCount,
-    depositSync,
-  };
 }
 
 export async function internalTransfer(

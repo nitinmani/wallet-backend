@@ -1,5 +1,6 @@
 import { Request, Response, Router } from "express";
 import { ethers } from "ethers";
+import { routeHandler } from "../lib/routeHandler";
 import { readContract, writeContract } from "../services/contractService";
 import { fetchContractAbiFromEtherscan } from "../services/etherscanService";
 
@@ -25,17 +26,17 @@ function parseAbi(abiInput: unknown): ethers.InterfaceAbi {
   throw new Error("abi is required and must be an array or JSON string");
 }
 
-contractRoutes.get("/abi/:contractAddress", async (req: Request, res: Response) => {
-  try {
+contractRoutes.get(
+  "/abi/:contractAddress",
+  routeHandler(async (req: Request, res: Response) => {
     const abi = await fetchContractAbiFromEtherscan(req.params.contractAddress);
     res.json({ abi });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
-  }
-});
+  })
+);
 
-contractRoutes.post("/read", async (req: Request, res: Response) => {
-  try {
+contractRoutes.post(
+  "/read",
+  routeHandler(async (req: Request, res: Response) => {
     const { contractAddress, abi, method, args, blockTag } = req.body;
 
     if (!contractAddress || !abi || !method) {
@@ -52,13 +53,12 @@ contractRoutes.post("/read", async (req: Request, res: Response) => {
     });
 
     res.json(result);
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
-  }
-});
+  })
+);
 
-contractRoutes.post("/:walletId/write", async (req: Request, res: Response) => {
-  try {
+contractRoutes.post(
+  "/:walletId/write",
+  routeHandler(async (req: Request, res: Response) => {
     const { contractAddress, abi, method, args, value, gasPrice, nonce } = req.body;
 
     if (!contractAddress || !abi || !method) {
@@ -86,7 +86,5 @@ contractRoutes.post("/:walletId/write", async (req: Request, res: Response) => {
     });
 
     res.json(result);
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
-  }
-});
+  })
+);

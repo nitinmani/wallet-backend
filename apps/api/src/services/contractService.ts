@@ -1,10 +1,10 @@
 import { ethers } from "ethers";
-import { Prisma } from "@prisma/client";
 import { withPgAdvisoryLock } from "../lib/pgLock";
 import { prisma } from "../lib/prisma";
 import { broadcastSignedTransaction, provider } from "../lib/provider";
 import { ensureNativeAsset, getWalletAssetBalance, setWalletAssetBalance } from "./assetService";
 import { getAccessibleWallet, getWalletSigningContext } from "./walletService";
+import { estimateGasCost, getNextNonce, getWalletLockKey } from "./txHelpers";
 
 type TxOverrides = {
   gasPrice?: bigint;
@@ -38,10 +38,6 @@ function normalizeArgs(args?: unknown[]): unknown[] {
   return args;
 }
 
-function getWalletLockKey(walletId: string, walletGroupId: string | null): string {
-  return walletGroupId ? `wallet-group:${walletGroupId}` : `wallet:${walletId}`;
-}
-
 function toSerializable(value: unknown): unknown {
   if (typeof value === "bigint") {
     return value.toString();
@@ -62,49 +58,10 @@ function toSerializable(value: unknown): unknown {
   return value;
 }
 
-async function estimateGasCost(
-  gasLimit: bigint,
-  overrideGasPrice?: bigint
-): Promise<{ gasCost: bigint; effectiveGasPrice: bigint }> {
-  if (overrideGasPrice !== undefined) {
-    return { gasCost: gasLimit * overrideGasPrice, effectiveGasPrice: overrideGasPrice };
-  }
-
-  const feeData = await provider.getFeeData();
-  const effectiveGasPrice = feeData.maxFeePerGas ?? feeData.gasPrice ?? 0n;
-  return { gasCost: gasLimit * effectiveGasPrice, effectiveGasPrice };
-}
-
 function getInsufficientBalanceMessage(amount: bigint, gasCost: bigint, available: bigint): string {
   return `Insufficient balance: need ${ethers.formatEther(
     amount + gasCost
   )} ETH (value + gas), have ${ethers.formatEther(available)} ETH`;
-}
-
-async function getNextNonce(
-  tx: Prisma.TransactionClient,
-  fromAddress: string
-): Promise<number> {
-  const chainPendingNonce = await provider.getTransactionCount(fromAddress, "pending");
-  const maxReserved = await tx.transaction.aggregate({
-    where: {
-      from: fromAddress,
-      status: {
-        in: ["PENDING", "BROADCASTING"],
-      },
-      nonce: {
-        not: null,
-      },
-    },
-    _max: { nonce: true },
-  });
-
-  const dbNextNonce =
-    maxReserved._max.nonce === null || maxReserved._max.nonce === undefined
-      ? chainPendingNonce
-      : maxReserved._max.nonce + 1;
-
-  return Math.max(chainPendingNonce, dbNextNonce);
 }
 
 export async function readContract(input: ContractReadInput) {

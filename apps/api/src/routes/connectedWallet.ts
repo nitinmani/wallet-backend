@@ -1,4 +1,5 @@
 import { Request, Response, Router } from "express";
+import { routeHandler } from "../lib/routeHandler";
 import {
   getConnectedWalletAssetBalances,
   getConnectedWalletByAddress,
@@ -40,8 +41,9 @@ function hasForbiddenKeyMaterial(value: unknown): boolean {
   });
 }
 
-connectedWalletRoutes.post("/challenge", async (req: Request, res: Response) => {
-  try {
+connectedWalletRoutes.post(
+  "/challenge",
+  routeHandler(async (req: Request, res: Response) => {
     if (hasForbiddenKeyMaterial(req.body)) {
       res.status(400).json({ error: "Never send private key material to this API" });
       return;
@@ -55,13 +57,12 @@ connectedWalletRoutes.post("/challenge", async (req: Request, res: Response) => 
 
     const challenge = await issueConnectedWalletChallenge(address);
     res.json(challenge);
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
-  }
-});
+  })
+);
 
-connectedWalletRoutes.post("/verify", async (req: Request, res: Response) => {
-  try {
+connectedWalletRoutes.post(
+  "/verify",
+  routeHandler(async (req: Request, res: Response) => {
     if (hasForbiddenKeyMaterial(req.body)) {
       res.status(400).json({ error: "Never send private key material to this API" });
       return;
@@ -85,54 +86,49 @@ connectedWalletRoutes.post("/verify", async (req: Request, res: Response) => {
       ...session,
       initialSync,
     });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
-  }
-});
+  })
+);
 
 connectedWalletRoutes.use(connectedWalletAuthMiddleware);
 
-connectedWalletRoutes.post("/logout", async (req: Request, res: Response) => {
-  try {
+connectedWalletRoutes.post(
+  "/logout",
+  routeHandler(async (req: Request, res: Response) => {
     const token = getConnectedWalletBearerToken(req);
     if (token) {
       await revokeConnectedWalletSession(token);
     }
     res.json({ ok: true });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
-  }
-});
+  })
+);
 
-connectedWalletRoutes.get("/me", async (req: Request, res: Response) => {
-  try {
+connectedWalletRoutes.get(
+  "/me",
+  routeHandler(async (req: Request, res: Response) => {
     const wallet = await getConnectedWalletByAddress(req.connectedWallet!.address);
     res.json(wallet);
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
-  }
-});
+  })
+);
 
-connectedWalletRoutes.get("/assets", async (req: Request, res: Response) => {
-  try {
+connectedWalletRoutes.get(
+  "/assets",
+  routeHandler(async (req: Request, res: Response) => {
     const assets = await getConnectedWalletAssetBalances(req.connectedWallet!.address);
     res.json(assets);
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
-  }
-});
+  })
+);
 
-connectedWalletRoutes.post("/sync", async (req: Request, res: Response) => {
-  try {
+connectedWalletRoutes.post(
+  "/sync",
+  routeHandler(async (req: Request, res: Response) => {
     const result = await syncConnectedWalletOnChainState(req.connectedWallet!.address);
     res.json(result);
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
-  }
-});
+  })
+);
 
-connectedWalletRoutes.get("/send-max", async (req: Request, res: Response) => {
-  try {
+connectedWalletRoutes.get(
+  "/send-max",
+  routeHandler(async (req: Request, res: Response) => {
     const assetId = req.query.assetId;
     const to = req.query.to;
     if (typeof assetId !== "string" || !assetId.trim()) {
@@ -146,16 +142,13 @@ connectedWalletRoutes.get("/send-max", async (req: Request, res: Response) => {
       typeof to === "string" ? to : undefined
     );
     res.json(result);
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
-  }
-});
+  })
+);
 
-connectedWalletRoutes.get("/abi/:contractAddress", async (req: Request, res: Response) => {
-  try {
+connectedWalletRoutes.get(
+  "/abi/:contractAddress",
+  routeHandler(async (req: Request, res: Response) => {
     const abi = await fetchContractAbiFromEtherscan(req.params.contractAddress);
     res.json({ abi });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
-  }
-});
+  })
+);

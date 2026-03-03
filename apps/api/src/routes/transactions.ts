@@ -1,4 +1,5 @@
 import { Router, Request, Response } from "express";
+import { routeHandler } from "../lib/routeHandler";
 import {
   getMaxSendAmount,
   sendAssetTransaction,
@@ -11,8 +12,9 @@ import {
 export const transactionRoutes = Router();
 
 // Send ETH
-transactionRoutes.post("/:walletId/send", async (req: Request, res: Response) => {
-  try {
+transactionRoutes.post(
+  "/:walletId/send",
+  routeHandler(async (req: Request, res: Response) => {
     const { to, amount, gasPrice, nonce, assetId } = req.body;
     if (!to || !amount) {
       res.status(400).json({ error: "to and amount are required" });
@@ -43,13 +45,12 @@ transactionRoutes.post("/:walletId/send", async (req: Request, res: Response) =>
           normalizedOverrides
         );
     res.json(result);
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
-  }
-});
+  })
+);
 
-transactionRoutes.get("/:walletId/send-max", async (req: Request, res: Response) => {
-  try {
+transactionRoutes.get(
+  "/:walletId/send-max",
+  routeHandler(async (req: Request, res: Response) => {
     const assetId = req.query.assetId;
     const to = req.query.to;
     if (typeof assetId !== "string" || !assetId.trim()) {
@@ -64,14 +65,13 @@ transactionRoutes.get("/:walletId/send-max", async (req: Request, res: Response)
       typeof to === "string" ? to : undefined
     );
     res.json(result);
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
-  }
-});
+  })
+);
 
 // Replace-by-fee
-transactionRoutes.post("/:walletId/rbf", async (req: Request, res: Response) => {
-  try {
+transactionRoutes.post(
+  "/:walletId/rbf",
+  routeHandler(async (req: Request, res: Response) => {
     const { originalTxId, gasPrice } = req.body;
     if (!originalTxId || !gasPrice) {
       res.status(400).json({ error: "originalTxId and gasPrice are required" });
@@ -85,14 +85,13 @@ transactionRoutes.post("/:walletId/rbf", async (req: Request, res: Response) => 
       BigInt(gasPrice)
     );
     res.json(result);
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
-  }
-});
+  })
+);
 
 // Internal transfer between sub-wallets
-transactionRoutes.post("/:walletId/transfer", async (req: Request, res: Response) => {
-  try {
+transactionRoutes.post(
+  "/:walletId/transfer",
+  routeHandler(async (req: Request, res: Response) => {
     const { toWalletId, amount, assetId } = req.body;
     if (!toWalletId || !amount) {
       res.status(400).json({ error: "toWalletId and amount are required" });
@@ -107,20 +106,17 @@ transactionRoutes.post("/:walletId/transfer", async (req: Request, res: Response
       assetId
     );
     res.json(result);
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
-  }
-});
+  })
+);
 
 // Get transaction history
-transactionRoutes.get("/:walletId/transactions", async (req: Request, res: Response) => {
-  try {
+transactionRoutes.get(
+  "/:walletId/transactions",
+  routeHandler(async (req: Request, res: Response) => {
     const transactions = await getWalletTransactions(
       req.params.walletId,
       req.user!.id
     );
     res.json(transactions);
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
-  }
-});
+  })
+);

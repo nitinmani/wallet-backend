@@ -1,6 +1,7 @@
 import { Router, Request, Response } from "express";
 import { ethers } from "ethers";
 import { provider } from "../lib/provider";
+import { routeHandler } from "../lib/routeHandler";
 import {
   getWalletAssetBalanceByContract,
   getWalletAssetBalances,
@@ -19,8 +20,9 @@ async function getAccessibleWallet(addressOrWalletId: string, userId: string) {
   });
 }
 
-balanceRoutes.get("/wallet/:walletId/assets", async (req: Request, res: Response) => {
-  try {
+balanceRoutes.get(
+  "/wallet/:walletId/assets",
+  routeHandler(async (req: Request, res: Response) => {
     const wallet = await getAccessibleWallet(req.params.walletId, req.user!.id);
     if (!wallet) {
       res.status(404).json({ error: "Wallet not found" });
@@ -29,14 +31,13 @@ balanceRoutes.get("/wallet/:walletId/assets", async (req: Request, res: Response
 
     const assets = await getWalletAssetBalances(wallet.id);
     res.json(assets);
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
-  }
-});
+  })
+);
 
 // Get balance by wallet ID (DB-backed) or by raw address (chain fallback)
-balanceRoutes.get("/:addressOrWalletId", async (req: Request, res: Response) => {
-  try {
+balanceRoutes.get(
+  "/:addressOrWalletId",
+  routeHandler(async (req: Request, res: Response) => {
     const { addressOrWalletId } = req.params;
     const { asset } = req.query;
     const wallet = await getAccessibleWallet(addressOrWalletId, req.user!.id);
@@ -110,8 +111,6 @@ balanceRoutes.get("/:addressOrWalletId", async (req: Request, res: Response) => 
       balance: balance.toString(),
       formatted: ethers.formatEther(balance),
     });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
-  }
-});
+  })
+);
 

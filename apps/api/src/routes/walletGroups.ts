@@ -1,4 +1,5 @@
 import { Request, Response, Router } from "express";
+import { routeHandler } from "../lib/routeHandler";
 import {
   createWalletInExistingWalletGroup,
   getUserWalletGroups,
@@ -8,43 +9,41 @@ import {
 
 export const walletGroupRoutes = Router();
 
-walletGroupRoutes.get("/", async (req: Request, res: Response) => {
-  try {
+walletGroupRoutes.get(
+  "/",
+  routeHandler(async (req: Request, res: Response) => {
     const walletGroups = await getUserWalletGroups(req.user!.id);
     res.json(walletGroups);
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
-  }
-});
+  })
+);
 
-walletGroupRoutes.get("/:walletGroupId", async (req: Request, res: Response) => {
-  try {
+walletGroupRoutes.get(
+  "/:walletGroupId",
+  routeHandler(async (req: Request, res: Response) => {
     const walletGroup = await getWalletGroupById(req.params.walletGroupId, req.user!.id);
     if (!walletGroup) {
       res.status(404).json({ error: "Wallet group not found" });
       return;
     }
     res.json(walletGroup);
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
-  }
-});
+  })
+);
 
-walletGroupRoutes.post("/:walletGroupId/wallets", async (req: Request, res: Response) => {
-  try {
+walletGroupRoutes.post(
+  "/:walletGroupId/wallets",
+  routeHandler(async (req: Request, res: Response) => {
     const wallet = await createWalletInExistingWalletGroup(
       req.params.walletGroupId,
       req.user!.id,
       req.body.name
     );
     res.status(201).json(wallet);
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
-  }
-});
+  })
+);
 
-walletGroupRoutes.patch("/:walletGroupId", async (req: Request, res: Response) => {
-  try {
+walletGroupRoutes.patch(
+  "/:walletGroupId",
+  routeHandler(async (req: Request, res: Response) => {
     const { name } = req.body;
     if (typeof name !== "string") {
       res.status(400).json({ error: "name is required" });
@@ -57,7 +56,5 @@ walletGroupRoutes.patch("/:walletGroupId", async (req: Request, res: Response) =
       name
     );
     res.json(walletGroup);
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
-  }
-});
+  })
+);
