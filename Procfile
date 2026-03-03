@@ -1,2 +1,2 @@
-web: npm run start --workspace=apps/api
-release: npm run db:push
+web: node scripts/heroku-start.js
+release: node scripts/heroku-release.js

@@ -1,4 +1,6 @@
-const API_BASE = "/api";
+const API_BASE = (
+  process.env.NEXT_PUBLIC_API_BASE_URL?.replace(/\/+$/, "") || "/api"
+);
 export const CONNECTED_WALLET_TOKEN_KEY = "vencura_connected_wallet_token";
 
 function formatWeiToEth(wei: string): string {

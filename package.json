@@ -9,7 +9,7 @@
     "dev": "npm run dev --workspace=apps/api",
     "dev:web": "npm run dev --workspace=apps/web",
     "build": "npm run build --workspaces",
-    "heroku-postbuild": "npm run db:generate && npm run build --workspace=apps/api",
+    "heroku-postbuild": "node scripts/heroku-postbuild.js",
     "db:migrate": "npx prisma migrate dev --schema=apps/api/prisma/schema.prisma",
     "db:generate": "npx prisma generate --schema=apps/api/prisma/schema.prisma",
     "db:push": "npx prisma db push --schema=apps/api/prisma/schema.prisma",
