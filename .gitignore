@@ -4,6 +4,10 @@ node_modules/
 # Next.js build output (Heroku builds this during deployment)
 apps/web/.next/
 
+# Foundry/Forge Solidity build artifacts
+cache/
+out/
+
 # TypeScript incremental build info
 *.tsbuildinfo
 
