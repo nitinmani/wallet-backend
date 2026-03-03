@@ -17,6 +17,7 @@ jest.mock("../../src/services/walletService", () => ({
 }));
 
 import { walletGroupRoutes } from "../../src/routes/walletGroups";
+import { AppError } from "../../src/lib/errors";
 import {
   getUserWalletGroups,
   getWalletGroupById,
@@ -147,16 +148,16 @@ describe("PATCH /api/wallet-groups/:walletGroupId", () => {
     expect(res.body.name).toBe("Treasury V2");
   });
 
-  test("returns 400 when group is not found or user has no access", async () => {
+  test("returns 404 when group is not found or user has no access", async () => {
     (updateWalletGroupName as jest.Mock).mockRejectedValue(
-      new Error("Wallet group not found")
+      new AppError(404, "Wallet group not found")
     );
 
     const res = await request(app)
       .patch("/api/wallet-groups/group-1")
       .send({ name: "Unauthorized" });
 
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(404);
     expect(res.body.error).toMatch(/not found/i);
   });
 });

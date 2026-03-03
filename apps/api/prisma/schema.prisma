@@ -18,15 +18,18 @@ model User {
 }
 
 model WalletGroup {
-  id           String   @id @default(uuid())
-  name         String   @default("Wallet Group")
-  address      String   @unique
-  encryptedKey String?
-  lastSyncBlock Int     @default(0)
-  ownerId      String
-  owner        User     @relation("WalletGroupOwner", fields: [ownerId], references: [id], onDelete: Cascade)
-  wallets      Wallet[]
-  createdAt    DateTime @default(now())
+  id             String   @id @default(uuid())
+  name           String   @default("Wallet Group")
+  nameNormalized String?
+  address        String   @unique
+  encryptedKey   String?
+  lastSyncBlock  Int      @default(0)
+  ownerId        String
+  owner          User     @relation("WalletGroupOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  wallets        Wallet[]
+  createdAt      DateTime @default(now())
+
+  @@unique([ownerId, nameNormalized])
 }
 
 model Wallet {

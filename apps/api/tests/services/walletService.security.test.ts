@@ -102,10 +102,11 @@ describe("walletService security", () => {
   });
 
   test("updateWalletGroupName response never exposes encrypted key material", async () => {
-    (prisma.walletGroup.findFirst as jest.Mock).mockResolvedValue({
-      id: "group-1",
-      ownerId: "user-1",
-    });
+    (prisma.walletGroup.findFirst as jest.Mock)
+      // group access check
+      .mockResolvedValueOnce({ id: "group-1", ownerId: "user-1" })
+      // ensureUniqueWalletGroupName — no conflict
+      .mockResolvedValueOnce(null);
     (prisma.walletGroup.update as jest.Mock).mockResolvedValue({
       id: "group-1",
       name: "New Group Name",

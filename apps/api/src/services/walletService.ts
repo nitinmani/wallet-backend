@@ -1,6 +1,7 @@
 import { ethers } from "ethers";
 import { Prisma } from "@prisma/client";
 import { decrypt, encrypt } from "../lib/keyvault";
+import { AppError } from "../lib/errors";
 import { prisma } from "../lib/prisma";
 import { provider } from "../lib/provider";
 import { ensureNativeAsset, setWalletAssetBalance } from "./assetService";
@@ -67,6 +68,37 @@ function isWalletNameUniqueConstraintError(err: unknown): boolean {
   return target.includes("walletGroupId") && target.includes("nameNormalized");
 }
 
+function isWalletGroupNameUniqueConstraintError(err: unknown): boolean {
+  if (!(err instanceof Prisma.PrismaClientKnownRequestError)) return false;
+  if (err.code !== "P2002") return false;
+
+  const target = (err.meta as { target?: unknown } | undefined)?.target;
+  if (!Array.isArray(target)) return false;
+
+  return target.includes("ownerId") && target.includes("nameNormalized");
+}
+
+async function ensureUniqueWalletGroupName(
+  ownerId: string,
+  groupName: string,
+  excludeGroupId?: string,
+  tx?: Prisma.TransactionClient
+) {
+  const db = getDb(tx);
+  const normalized = normalizeWalletName(groupName);
+  const existing = await db.walletGroup.findFirst({
+    where: {
+      ownerId,
+      nameNormalized: normalized,
+      ...(excludeGroupId ? { id: { not: excludeGroupId } } : {}),
+    },
+    select: { id: true },
+  });
+  if (existing) {
+    throw new Error("Wallet group name already exists");
+  }
+}
+
 async function ensureUniqueWalletNameInGroup(
   walletGroupId: string,
   walletName: string,
@@ -126,39 +158,57 @@ async function createWalletRecordInGroup(
 export async function createWallet(userId: string, name?: string) {
   const walletName = name?.trim() || "Default Wallet";
   const walletNameNormalized = normalizeWalletName(walletName);
+  const groupName = `${name?.trim() || "Wallet"} Group`;
+  const groupNameNormalized = name?.trim() ? normalizeWalletName(groupName) : null;
   const signer = ethers.Wallet.createRandom();
   const encryptedKey = encrypt(signer.privateKey);
   const lastSyncBlock = await provider.getBlockNumber();
 
-  return prisma.$transaction(async (tx) => {
-    const walletGroup = await tx.walletGroup.create({
-      data: {
-        name: `${name?.trim() || "Wallet"} Group`,
-        address: signer.address,
-        encryptedKey,
-        ownerId: userId,
-        lastSyncBlock,
-      },
-    });
+  try {
+    return await prisma.$transaction(async (tx) => {
+      if (groupNameNormalized) {
+        await ensureUniqueWalletGroupName(userId, groupName, undefined, tx);
+      }
 
-    const wallet = await tx.wallet.create({
-      data: {
-        name: walletName,
-        nameNormalized: walletNameNormalized,
-        walletGroupId: walletGroup.id,
-        ownerId: userId,
-      },
-      include: walletInclude,
-    });
+      const walletGroup = await tx.walletGroup.create({
+        data: {
+          name: groupName,
+          nameNormalized: groupNameNormalized,
+          address: signer.address,
+          encryptedKey,
+          ownerId: userId,
+          lastSyncBlock,
+        },
+      });
 
-    const nativeAsset = await ensureNativeAsset(tx);
-    await setWalletAssetBalance(wallet.id, nativeAsset.id, 0n, tx);
-    return decorateWallet(wallet);
-  });
+      const wallet = await tx.wallet.create({
+        data: {
+          name: walletName,
+          nameNormalized: walletNameNormalized,
+          walletGroupId: walletGroup.id,
+          ownerId: userId,
+        },
+        include: walletInclude,
+      });
+
+      const nativeAsset = await ensureNativeAsset(tx);
+      await setWalletAssetBalance(wallet.id, nativeAsset.id, 0n, tx);
+      return decorateWallet(wallet);
+    });
+  } catch (err) {
+    if (isWalletGroupNameUniqueConstraintError(err)) {
+      throw new Error("Wallet group name already exists");
+    }
+    throw err;
+  }
 }
 
-export async function getAccessibleWallet(walletId: string, userId: string) {
-  const wallet = await prisma.wallet.findFirst({
+export async function getAccessibleWallet(
+  walletId: string,
+  userId: string,
+  client: typeof prisma | Prisma.TransactionClient = prisma
+) {
+  const wallet = await client.wallet.findFirst({
     where: {
       id: walletId,
       OR: [{ ownerId: userId }, { accesses: { some: { userId } } }],
@@ -179,7 +229,7 @@ export async function createWalletInWalletGroup(
   });
 
   if (!sourceWallet) {
-    throw new Error("Source wallet not found or does not belong to user");
+    throw new AppError(404, "Source wallet not found or does not belong to user");
   }
 
   return createWalletRecordInGroup(sourceWallet.walletGroupId, userId, name);
@@ -257,7 +307,7 @@ export async function createWalletInExistingWalletGroup(
   });
 
   if (!walletGroup) {
-    throw new Error("Wallet group not found");
+    throw new AppError(404, "Wallet group not found");
   }
 
   return createWalletRecordInGroup(walletGroupId, userId, name);
@@ -273,7 +323,7 @@ export async function shareWalletWithUser(
   });
 
   if (!wallet) {
-    throw new Error("Wallet not found or does not belong to user");
+    throw new AppError(404, "Wallet not found or does not belong to user");
   }
 
   const user = await prisma.user.findUnique({
@@ -281,7 +331,7 @@ export async function shareWalletWithUser(
   });
 
   if (!user) {
-    throw new Error("Target user not found");
+    throw new AppError(404, "Target user not found");
   }
 
   if (user.id === ownerUserId) {
@@ -327,7 +377,7 @@ export async function getWalletById(userId: string, walletId: string) {
 export async function getWalletSigningContext(walletId: string, userId: string) {
   const wallet = await getAccessibleWallet(walletId, userId);
   if (!wallet) {
-    throw new Error("Wallet not found");
+    throw new AppError(404, "Wallet not found");
   }
 
   const walletGroupId = wallet.walletGroupId;
@@ -372,7 +422,7 @@ export async function updateWalletName(
 
   const wallet = await getAccessibleWallet(walletId, userId);
   if (!wallet) {
-    throw new Error("Wallet not found");
+    throw new AppError(404, "Wallet not found");
   }
 
   await ensureUniqueWalletNameInGroup(wallet.walletGroupId, normalized, walletId);
@@ -417,13 +467,22 @@ export async function updateWalletGroupName(
   });
 
   if (!walletGroup) {
-    throw new Error("Wallet group not found");
+    throw new AppError(404, "Wallet group not found");
   }
 
-  const updated = await prisma.walletGroup.update({
-    where: { id: walletGroupId },
-    data: { name: normalized },
-  });
+  const normalizedKey = normalizeWalletName(normalized);
+  await ensureUniqueWalletGroupName(walletGroup.ownerId, normalized, walletGroupId);
 
-  return decorateWalletGroup(updated);
+  try {
+    const updated = await prisma.walletGroup.update({
+      where: { id: walletGroupId },
+      data: { name: normalized, nameNormalized: normalizedKey },
+    });
+    return decorateWalletGroup(updated);
+  } catch (err) {
+    if (isWalletGroupNameUniqueConstraintError(err)) {
+      throw new Error("Wallet group name already exists");
+    }
+    throw err;
+  }
 }

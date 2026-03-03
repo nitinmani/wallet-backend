@@ -682,7 +682,7 @@ describe("walletMetadataUpdates", () => {
       .set("x-api-key", outsider.apiKey)
       .send({ name: "Should Not Work" });
 
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(404);
     expect(res.body.error).toMatch(/not found/i);
   });
 });
@@ -697,6 +697,42 @@ describe("walletGroupsApi", () => {
     const duplicateRes = await createWalletInGroup(testApiKey, sourceWallet.id, "Team Wallet");
     expect(duplicateRes.status).toBe(400);
     expect(duplicateRes.body.error).toMatch(/already exists in this wallet group/i);
+  });
+
+  test("cannot create two wallets with the same name (wallet group names must be unique per user)", async () => {
+    await createTestWallet("Unique Group Wallet");
+
+    const duplicateRes = await request(app)
+      .post("/api/wallets")
+      .set("x-api-key", testApiKey)
+      .send({ name: "Unique Group Wallet" });
+
+    expect(duplicateRes.status).toBe(400);
+    expect(duplicateRes.body.error).toMatch(/wallet group name already exists/i);
+  });
+
+  test("cannot rename a wallet group to an existing group name", async () => {
+    await createTestWallet("Alpha Wallet");
+    const betaWallet = await createTestWallet("Beta Wallet");
+
+    const res = await request(app)
+      .patch(`/api/wallet-groups/${betaWallet.walletGroupId}`)
+      .set("x-api-key", testApiKey)
+      .send({ name: "Alpha Wallet Group" });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/wallet group name already exists/i);
+  });
+
+  test("can rename a wallet group to its own current name (no-op)", async () => {
+    const wallet = await createTestWallet("Self Rename Wallet");
+
+    const res = await request(app)
+      .patch(`/api/wallet-groups/${wallet.walletGroupId}`)
+      .set("x-api-key", testApiKey)
+      .send({ name: "Self Rename Wallet Group" });
+
+    expect(res.status).toBe(200);
   });
 
   test("can add wallets to an existing wallet group", async () => {

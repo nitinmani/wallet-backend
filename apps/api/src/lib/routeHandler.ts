@@ -1,4 +1,5 @@
 import { NextFunction, Request, RequestHandler, Response } from "express";
+import { AppError } from "./errors";
 
 type AsyncRouteHandler = (
   req: Request,
@@ -33,7 +34,7 @@ export function routeHandler(
         return;
       }
 
-      const status = options?.status ?? 400;
+      const status = err instanceof AppError ? err.status : (options?.status ?? 400);
       res.status(status).json({ error: getErrorMessage(err) });
     }
   };

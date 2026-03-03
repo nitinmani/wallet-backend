@@ -1,4 +1,5 @@
 import { ethers } from "ethers";
+import { AppError } from "../lib/errors";
 import { withPgAdvisoryLock } from "../lib/pgLock";
 import { prisma } from "../lib/prisma";
 import { broadcastSignedTransaction, provider } from "../lib/provider";
@@ -101,7 +102,7 @@ export async function writeContract(input: ContractWriteInput) {
 
   const lockWallet = await getAccessibleWallet(walletId, userId);
   if (!lockWallet) {
-    throw new Error("Wallet not found");
+    throw new AppError(404, "Wallet not found");
   }
 
   const lockKey = getWalletLockKey(lockWallet.id, lockWallet.walletGroupId);

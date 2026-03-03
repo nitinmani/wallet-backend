@@ -1,5 +1,6 @@
 import { ethers } from "ethers";
 import { Prisma } from "@prisma/client";
+import { AppError } from "../lib/errors";
 import { withPgAdvisoryLock } from "../lib/pgLock";
 import { prisma } from "../lib/prisma";
 import { broadcastSignedTransaction, provider } from "../lib/provider";
@@ -57,7 +58,7 @@ export async function sendTransaction(
 ) {
   const lockWallet = await getAccessibleWallet(walletId, userId);
   if (!lockWallet) {
-    throw new Error("Wallet not found");
+    throw new AppError(404, "Wallet not found");
   }
 
   const lockKey = getWalletLockKey(lockWallet.id, lockWallet.walletGroupId);
@@ -177,7 +178,7 @@ export async function sendERC20Transaction(
 ) {
   const lockWallet = await getAccessibleWallet(walletId, userId);
   if (!lockWallet) {
-    throw new Error("Wallet not found");
+    throw new AppError(404, "Wallet not found");
   }
 
   const lockKey = getWalletLockKey(lockWallet.id, lockWallet.walletGroupId);
@@ -233,7 +234,7 @@ export async function sendERC20Transaction(
       },
     });
     if (!trackedTokenAsset) {
-      throw new Error("Token not tracked for this wallet");
+      throw new AppError(404, "Token not tracked for this wallet");
     }
 
     const walletTokenBalance = await getWalletAssetBalance(
@@ -346,7 +347,7 @@ export async function sendAssetTransaction(
 ) {
   const wallet = await getAccessibleWallet(walletId, userId);
   if (!wallet) {
-    throw new Error("Wallet not found");
+    throw new AppError(404, "Wallet not found");
   }
 
   const assetRow = await prisma.walletAssetBalance.findFirst({
@@ -355,7 +356,7 @@ export async function sendAssetTransaction(
   });
 
   if (!assetRow) {
-    throw new Error("Asset not found in wallet");
+    throw new AppError(404, "Asset not found in wallet");
   }
 
   if (assetRow.asset.type === "NATIVE") {
@@ -378,7 +379,7 @@ export async function getMaxSendAmount(
 ) {
   const wallet = await getAccessibleWallet(walletId, userId);
   if (!wallet) {
-    throw new Error("Wallet not found");
+    throw new AppError(404, "Wallet not found");
   }
 
   const assetRow = await prisma.walletAssetBalance.findFirst({
@@ -387,7 +388,7 @@ export async function getMaxSendAmount(
   });
 
   if (!assetRow) {
-    throw new Error("Asset not found in wallet");
+    throw new AppError(404, "Asset not found in wallet");
   }
 
   const assetBalance = BigInt(assetRow.balance);
@@ -692,7 +693,7 @@ export async function internalTransfer(
   const toWallet = await getAccessibleWallet(toWalletId, userId);
 
   if (!fromWallet || !toWallet) {
-    throw new Error("Both wallets must belong to the user or be shared with the user");
+    throw new AppError(404, "Both wallets must belong to the user or be shared with the user");
   }
 
   if (!fromWallet.walletGroupId || !toWallet.walletGroupId) {
@@ -710,10 +711,10 @@ export async function internalTransfer(
   const lockKey = getWalletLockKey(fromWallet.id, fromWallet.walletGroupId);
 
   return withPgAdvisoryLock(lockKey, async (tx) => {
-    const freshFrom = await getAccessibleWallet(fromWalletId, userId);
-    const freshTo = await getAccessibleWallet(toWalletId, userId);
+    const freshFrom = await getAccessibleWallet(fromWalletId, userId, tx);
+    const freshTo = await getAccessibleWallet(toWalletId, userId, tx);
     if (!freshFrom || !freshTo) {
-      throw new Error("Wallet access changed during transfer");
+      throw new AppError(404, "Wallet access changed during transfer");
     }
 
     const nativeAsset = await ensureNativeAsset(tx);
