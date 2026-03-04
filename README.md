@@ -62,9 +62,9 @@ There is no automatic Replace-By-Fee (RBF) bump or expiry logic. A stuck BROADCA
 
 #### Background Job Reliability
 
-> **⚠️ High:** All three cron jobs run as `setInterval` callbacks in the main process. There is no retry logic, no dead-letter queue, and no persistence of job state across restarts.
+> **⚠️ High:** All three cron jobs run as `setInterval` callbacks in the main process. There is limited retry/reconnect handling for transient Prisma connectivity issues, but there is no durable job queue, dead-letter queue, or persistence of job state across restarts.
 
-If the server crashes mid-reconciliation, the in-memory `isReconcilingBroadcasts` guard resets on resta. This is fine, but any partially-processed batch is simply abandoned. More seriously, if the server is down for an extended period, the deposit detector resumes from `lastSyncBlock` and catches up, but there is no alerting on a large gap, and if the RPC node has pruned old blocks, the scan silently skips them. The reconciler also has no awareness of its own operational status. A silent failure in the interval callback (e.g., a DB connectivity error) will simply not run until the next tick, with no alerting.
+If the server crashes mid-reconciliation, the in-memory `isReconcilingBroadcasts` guard resets on restart. This is fine, but any partially-processed batch is simply abandoned. More seriously, if the server is down for an extended period, the deposit detector resumes from `lastSyncBlock` and catches up, but there is no alerting on a large gap, and if the RPC node has pruned old blocks, the scan silently skips them. The reconciler also has no awareness of its own operational status. A silent failure in the interval callback (e.g., a DB connectivity error) will simply not run until the next tick, with no alerting.
 
 #### Single RPC Endpoint Dependency
 
@@ -98,7 +98,7 @@ A leaked key grants permanent full access to all wallet operations for that user
 
 > **🟡 Medium:** The API uses `app.use(cors())` with no options, which sets `Access-Control-Allow-Origin: *` — any web origin can make credentialed requests to the API.
 
-The API uses `app.use(cors())` with no options, which allows any web origin to issue cross-origin requests to the API from a browser and read the responses. This broadens the attack surface and makes it easier for malicious sites to interact with the API from a victim's browser. The production fix is to explicitly allow trusted frotend origins (`https://vencura-9c82d3427d01.herokuapp.com`) and restrict allowed methods and headers. CORS should also enforce credentials and require explicit origin matching.
+The API uses `app.use(cors())` with no options, which allows any web origin to issue cross-origin requests to the API from a browser and read the responses. This broadens the attack surface and makes it easier for malicious sites to interact with the API from a victim's browser. The production fix is to explicitly allow trusted frontend origins (`https://vencura-9c82d3427d01.herokuapp.com`) and restrict allowed methods and headers. CORS should also enforce credentials and require explicit origin matching.
 
 #### Other Simplified Items
 
@@ -137,7 +137,7 @@ The send transaction must be split into two separate database transactions. Toda
 
 The `setInterval` cron jobs in `scheduler.ts` need to be replaced with a proper job queue, most naturally **BullMQ backed by Redis**. BullMQ gives built-in retry with exponential backoff, dead-letter queues for jobs that exhaust retries, concurrency controls, and job state persistence across restarts. A crashed server no longer silently drops an in-flight reconciliation tick — the job stays in the queue. Deposit detection can also move from 60-second block polling to RPC WebSocket event subscriptions, making deposit crediting near-real-time rather than up-to-60-seconds delayed.
 
-The nonce manager is safe across multiple API instances as long as nonce allocation goes through a single Postgres primary and uses a transaction-scoped advisory lock keyed by chainId and wallet address. Inside that lock, computing `max(chainPendingNonce, dbMaxReservedNonce + 1)` and persisting the reserved nonce in the same transaction prevents concurrent allocation. If we move to multiple databases, we would need a distributed coordinator to handle nonce synchroniztion.
+The nonce manager is safe across multiple API instances as long as nonce allocation goes through a single Postgres primary and uses the current transaction-scoped advisory lock keying strategy (wallet-group scope, with wallet fallback). Inside that lock, computing `max(chainPendingNonce, dbMaxReservedNonce + 1)` and persisting the reserved nonce in the same transaction prevents concurrent allocation. If we move to multiple databases, we would need a distributed coordinator to handle nonce synchronization.
 
 ### P0 — Before Any Real Funds
 
@@ -201,38 +201,47 @@ The nonce manager is safe across multiple API instances as long as nonce allocat
 
 ## Appendix B — API Endpoints
 
+> **Note on scope:** This demo intentionally does not expose full CRUD for every resource due to time constraints (for example, there are no dedicated create/delete endpoints for wallet groups). In production, we would provide full CRUD coverage with stricter authorization, audit logging, and retention-aware delete semantics.
+
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | **Users** ||||
 | POST | `/api/users` | None | Create user. Returns `{ id, email, apiKey }` |
 | GET | `/api/users/me` | API key | Get current user (returns `apiKey` in response) |
+| GET | `/api/users` | API key | List users (for sharing workflows) |
 | **Wallet Groups** ||||
-| POST | `/api/wallet-groups` | API key | Create wallet group (generates keypair + on-chain address) |
 | GET | `/api/wallet-groups` | API key | List owned wallet groups |
-| GET | `/api/wallet-groups/:id` | API key | Get wallet group |
-| PATCH | `/api/wallet-groups/:id` | API key | Rename wallet group |
-| DELETE | `/api/wallet-groups/:id` | API key | Delete wallet group (cascades to wallets and transactions) |
-| POST | `/api/wallet-groups/:id/wallets` | API key | Create wallet within an existing group |
+| GET | `/api/wallet-groups/:walletGroupId` | API key | Get wallet group |
+| PATCH | `/api/wallet-groups/:walletGroupId` | API key | Rename wallet group |
+| POST | `/api/wallet-groups/:walletGroupId/wallets` | API key | Create wallet within an existing group |
 | **Wallets** ||||
 | POST | `/api/wallets` | API key | Create wallet (auto-creates a WalletGroup) |
 | GET | `/api/wallets` | API key | List wallets the user owns or has access to |
-| GET | `/api/wallets/:id` | API key | Get wallet |
-| PATCH | `/api/wallets/:id` | API key | Rename wallet |
-| POST | `/api/wallets/:id/share` | API key | Grant another user access to this wallet |
-| POST | `/api/wallets/:id/send` | API key | Send ETH or ERC20 on-chain. Body: `{ to, amount, assetId? }` |
-| POST | `/api/wallets/:id/transfer` | API key | Internal off-chain transfer. Body: `{ toWalletId, amount }` |
-| POST | `/api/wallets/:id/sign` | API key | Sign a message (EIP-191). Returns `{ signature, address }` |
-| GET | `/api/wallets/:id/transactions` | API key | List transactions for wallet |
+| GET | `/api/wallets/:walletId` | API key | Get wallet |
+| PATCH | `/api/wallets/:walletId` | API key | Rename wallet |
+| POST | `/api/wallets/:walletId/group-wallet` | API key | Create additional wallet in the same wallet group |
+| POST | `/api/wallets/:walletId/share` | API key | Grant another user access to this wallet |
+| POST | `/api/wallets/:walletId/sign` | API key | Sign a message (EIP-191). Returns `{ signature, address }` |
+| **Transactions** ||||
+| POST | `/api/wallets/:walletId/send` | API key | Send ETH or ERC20 on-chain. Body: `{ to, amount, assetId? }` |
+| GET | `/api/wallets/:walletId/send-max` | API key | Compute max sendable amount for a selected asset |
+| POST | `/api/wallets/:walletId/transfer` | API key | Internal off-chain transfer. Body: `{ toWalletId, amount, assetId? }` |
+| GET | `/api/wallets/:walletId/transactions` | API key | List transactions for wallet |
 | **Balance & Assets** ||||
-| GET | `/api/balance/:walletId` | API key | Returns `{ balance, lockedBalance, formatted }` (Wei strings) |
-| GET | `/api/assets` | API key | List registered ERC20 assets |
+| GET | `/api/balance/:addressOrWalletId` | API key | Get native balance by wallet ID (DB-backed) or raw address (chain fallback) |
+| GET | `/api/balance/wallet/:walletId/assets` | API key | List tracked asset balances for a wallet |
 | **Contracts** ||||
+| GET | `/api/contracts/abi/:contractAddress` | API key | Fetch ABI from Etherscan |
 | POST | `/api/contracts/read` | API key | Call a read-only contract function |
-| POST | `/api/contracts/write` | API key | Send a state-changing contract transaction |
+| POST | `/api/contracts/:walletId/write` | API key | Send a state-changing contract transaction |
 | **Non-Custodial Wallet** ||||
-| POST | `/api/connected-wallet/challenge` | None | Issue SIWE challenge. Body: `{ address }`. Returns `{ message }` |
-| POST | `/api/connected-wallet/verify` | None | Verify signature. Body: `{ address, signature }`. Returns `{ token }` |
+| POST | `/api/connected-wallet/challenge` | None | Issue challenge. Body: `{ address }`. Returns `{ address, message, expiresAt }` |
+| POST | `/api/connected-wallet/verify` | None | Verify signature. Body: `{ address, signature }`. Returns session info + `initialSync` |
 | POST | `/api/connected-wallet/logout` | Bearer token | Invalidate session |
-| GET | `/api/connected-wallet/wallets` | Bearer token | List wallets accessible to the connected address |
+| GET | `/api/connected-wallet/me` | Bearer token | Get connected wallet summary |
+| GET | `/api/connected-wallet/assets` | Bearer token | Get connected wallet asset balances |
+| POST | `/api/connected-wallet/sync` | Bearer token | Trigger wallet + asset sync |
+| GET | `/api/connected-wallet/send-max?assetId=...` | Bearer token | Compute max sendable amount for selected connected-wallet asset |
+| GET | `/api/connected-wallet/abi/:contractAddress` | Bearer token | Fetch ABI from Etherscan |
 
 ---
