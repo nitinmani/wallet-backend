@@ -2,7 +2,7 @@
 
 *Covers design decisions, key risks, and the path from MVP to production-grade custody.*
 
-**Live deployment:** 
+**Live deployment:** <br>
 UI: https://vencura-9c82d3427d01.herokuapp.com/<br>
 API: https://vencura-9c82d3427d01.herokuapp.com/api
 
