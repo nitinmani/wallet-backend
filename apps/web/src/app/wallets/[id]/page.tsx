@@ -332,12 +332,13 @@ export default function WalletDetail() {
 
   async function load() {
     try {
-      const [w, txs, userList, assets, me] = await Promise.all([
+      const [w, txs, userList, assets, me, accessibleWallets] = await Promise.all([
         api.getWallet(walletId),
         api.getTransactions(walletId),
         api.getUsers(),
         api.getWalletAssets(walletId),
         api.getMe(),
+        api.getWallets(),
       ]);
       setWallet(w);
       setWalletNameDraft(w.name);
@@ -369,8 +370,14 @@ export default function WalletDetail() {
 
       if (w.walletGroupId) {
         const group = await api.getWalletGroup(w.walletGroupId);
+        const accessibleWalletIds = new Set(
+          accessibleWallets.map((accessibleWallet: any) => accessibleWallet.id)
+        );
         const options = (group.wallets || [])
-          .filter((groupWallet: any) => groupWallet.id !== w.id)
+          .filter(
+            (groupWallet: any) =>
+              groupWallet.id !== w.id && accessibleWalletIds.has(groupWallet.id)
+          )
           .map((groupWallet: any) => ({
             id: groupWallet.id,
             name: groupWallet.name,

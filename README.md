@@ -22,80 +22,7 @@ The main concurrency gap is that the entire send — gas estimation, on-chain ba
 
 ### System Architecture
 
-**Figure 1 — Current Architecture (MVP)**
-
-```mermaid
-flowchart TD
-    Client["🖥️ Client\nBrowser / API user"]
-
-    subgraph API["Express API Server — Node.js · Heroku (single instance)"]
-        direction TB
-        SIGN["⚠️ In-Process Signing\nPrivate key in Node.js heap"]
-        ENCKEY["⚠️ Single ENCRYPTION_KEY\nOne env var encrypts every\nprivate key in the database"]
-        SIGN --> ENCKEY
-    end
-
-    subgraph CRON["setInterval Cron Jobs"]
-        direction TB
-        C1["depositDetector — 60s · block polling"]
-        C2["reconciler — 15s · receipt polling"]
-        C3["balanceSync — 10min · on-chain reads"]
-    end
-
-    RPC["⚠️ Sepolia RPC\nSingle endpoint — no failover"]
-
-    PG["🗄️ PostgreSQL\nWalletGroup · encryptedKey\nWallet (logical sub-account)\nWalletAssetBalance\nTransaction · status · txHash\nAsset (ERC20 registry)\n⚠️ No AuditLog"]
-
-    Client -->|"x-api-key (plaintext)"| API
-    API -->|eth_sendRawTx| RPC
-    API --> PG
-    CRON -->|block + receipt polling| RPC
-    CRON --> PG
-
-    style ENCKEY fill:#ffe0e0,stroke:#b00
-    style SIGN fill:#fff3cd,stroke:#c07800
-    style CRON fill:#f5f0dc,stroke:#907020
-    style RPC fill:#ede0ff,stroke:#7040b0
-    style PG fill:#e8f2e0,stroke:#3a7020
-```
-
-**Figure 2 — Production Target Architecture**
-
-```mermaid
-flowchart TD
-    Client["🖥️ Client\nBrowser / API user"]
-
-    GW["🔐 API Gateway\nmTLS · scoped JWT tokens\nbcrypt API key store"]
-
-    subgraph APIS["API Servers — stateless · N instances"]
-    end
-
-    KMS["🔑 KMS / HSM or MPC\nKey never enters app process\nRoot → MEK → DEK → PK"]
-
-    PG["🗄️ PostgreSQL (TDE)\nWalletGroup · dek_encrypted\n✅ AuditLog (append-only)\n✅ app_user: DML-only\n✅ Amount / balance constraints"]
-
-    REDIS["⚡ Redis\nNon-custodial sessions\nSIWE challenge store (EIP-4361)\nNonce manager (atomic incr)\nBullMQ job queue\nTTL eviction · max-key limits"]
-
-    RPC["🌐 RPC Cluster\nAlchemy → Infura → self-hosted node\n✅ Automatic failover\n✅ WebSocket subscriptions"]
-
-    BULL["⚙️ BullMQ Workers\ndepositDetector · reconciler · balanceSync\n✅ Retry + dead-letter + crash persistence"]
-
-    Client -->|"OAuth2 JWT + mTLS cert"| GW
-    GW -->|verified request| APIS
-    APIS -->|sign(tx)| KMS
-    APIS --> PG
-    APIS --> REDIS
-    APIS --> RPC
-    REDIS -->|job queue| BULL
-    BULL --> RPC
-    BULL --> PG
-
-    style KMS fill:#fff8e0,stroke:#9a7000,stroke-width:2px
-    style REDIS fill:#e0e8f5,stroke:#446688
-    style PG fill:#e8f2e0,stroke:#3a7020
-    style RPC fill:#ede0ff,stroke:#7040b0
-    style BULL fill:#f0ece0,stroke:#7a6020
-```
+![Architecture](docs/architecture.jpg)
 
 ---
 
@@ -307,5 +234,3 @@ The nonce manager works correctly in a single-process deployment but would need 
 | GET | `/api/connected-wallet/wallets` | Bearer token | List wallets accessible to the connected address |
 
 ---
-
-*March 2026 — wallet-backend monorepo (Express + Prisma + ethers.js v6, Sepolia)*
