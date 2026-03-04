@@ -3,6 +3,14 @@ const API_BASE = (
 );
 export const CONNECTED_WALLET_TOKEN_KEY = "vencura_connected_wallet_token";
 
+type ApiFetchError = Error & { status?: number };
+
+function createApiFetchError(message: string, status: number): ApiFetchError {
+  const err = new Error(message) as ApiFetchError;
+  err.status = status;
+  return err;
+}
+
 function formatWeiToEth(wei: string): string {
   try {
     const value = BigInt(wei);
@@ -80,7 +88,7 @@ async function apiFetch(path: string, options: RequestInit = {}) {
         : typeof data?.message === "string"
         ? data.message
         : `Request failed (${res.status})`;
-    throw new Error(normalizeApiErrorMessage(message));
+    throw createApiFetchError(normalizeApiErrorMessage(message), res.status);
   }
 
   return data;
@@ -119,7 +127,7 @@ async function connectedWalletFetch(path: string, options: RequestInit = {}) {
         : typeof data?.message === "string"
         ? data.message
         : `Request failed (${res.status})`;
-    throw new Error(normalizeApiErrorMessage(message));
+    throw createApiFetchError(normalizeApiErrorMessage(message), res.status);
   }
 
   return data;

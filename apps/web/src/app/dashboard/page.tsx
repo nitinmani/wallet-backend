@@ -46,11 +46,13 @@ export default function Dashboard() {
   const [wallets, setWallets] = useState<Wallet[]>([]);
   const [walletGroups, setWalletGroups] = useState<WalletGroup[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
 
   const [creatingWallet, setCreatingWallet] = useState(false);
   const [walletName, setWalletName] = useState("");
 
   async function loadDashboard() {
+    setLoadError("");
     try {
       const [walletData, walletGroupData] = await Promise.all([
         api.getWallets(),
@@ -58,8 +60,14 @@ export default function Dashboard() {
       ]);
       setWallets(walletData);
       setWalletGroups(walletGroupData);
-    } catch {
-      router.push("/");
+    } catch (err: any) {
+      const status = err?.status;
+      if (status === 401 || status === 403) {
+        localStorage.removeItem("vencura_api_key");
+        router.push("/");
+        return;
+      }
+      setLoadError(err?.message || "Failed to load dashboard.");
     } finally {
       setLoading(false);
     }
@@ -100,6 +108,12 @@ export default function Dashboard() {
           Logout
         </button>
       </div>
+
+      {loadError && (
+        <div className="p-3 mb-6 bg-red-900/30 border border-red-800 rounded-lg text-red-300 text-sm">
+          {loadError}
+        </div>
+      )}
 
       <div className="mb-8">
         <div className="p-4 bg-gray-900 border border-gray-800 rounded-lg">

@@ -263,6 +263,7 @@ export default function WalletDetail() {
   const [transferResult, setTransferResult] = useState("");
 
   const [users, setUsers] = useState<UserOption[]>([]);
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
   const [groupWalletOptions, setGroupWalletOptions] = useState<GroupWalletOption[]>([]);
   const [shareEmail, setShareEmail] = useState("");
   const [shareResult, setShareResult] = useState("");
@@ -331,17 +332,19 @@ export default function WalletDetail() {
 
   async function load() {
     try {
-      const [w, txs, userList, assets] = await Promise.all([
+      const [w, txs, userList, assets, me] = await Promise.all([
         api.getWallet(walletId),
         api.getTransactions(walletId),
         api.getUsers(),
         api.getWalletAssets(walletId),
+        api.getMe(),
       ]);
       setWallet(w);
       setWalletNameDraft(w.name);
       setTransactions(txs);
       setUsers(userList);
       setWalletAssets(assets);
+      setCurrentUserId(me.id);
       const visibleAssets = assets.filter((asset: WalletAsset) =>
         hasPositiveBalance(asset.balance)
       );
@@ -493,6 +496,10 @@ export default function WalletDetail() {
   async function handleShare() {
     setError("");
     setShareResult("");
+    if (!wallet || wallet.ownerId !== currentUserId) {
+      setError("Only the wallet owner can share access");
+      return;
+    }
     if (!shareEmail) {
       setError("Select a user to share with");
       return;
@@ -671,10 +678,11 @@ export default function WalletDetail() {
 
   if (loading) return <p className="text-gray-400 mt-10">Loading...</p>;
   if (!wallet) return <p className="text-red-400 mt-10">Wallet not found</p>;
+  const isWalletOwner = !!currentUserId && wallet.ownerId === currentUserId;
   const sharedEmails = new Set((wallet.accesses || []).map((access) => access.user.email));
-  const shareableUsers = users.filter(
-    (user) => user.id !== wallet.ownerId && !sharedEmails.has(user.email)
-  );
+  const shareableUsers = isWalletOwner
+    ? users.filter((user) => user.id !== wallet.ownerId && !sharedEmails.has(user.email))
+    : [];
   const visibleWalletAssets = walletAssets.filter((asset) =>
     hasPositiveBalance(asset.balance)
   );
@@ -1161,6 +1169,7 @@ export default function WalletDetail() {
           <select
             value={shareEmail}
             onChange={(e) => setShareEmail(e.target.value)}
+            disabled={!isWalletOwner}
             className="w-full px-3 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm mb-2 focus:outline-none focus:border-blue-500"
           >
             <option value="">Select existing user</option>
@@ -1172,10 +1181,14 @@ export default function WalletDetail() {
           </select>
           <button
             onClick={handleShare}
-            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 rounded-lg text-sm font-medium transition"
+            disabled={!isWalletOwner || !shareEmail}
+            className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 rounded-lg text-sm font-medium transition disabled:opacity-50 disabled:cursor-not-allowed"
           >
             Share
           </button>
+          {!isWalletOwner && (
+            <p className="mt-2 text-xs text-gray-500">Only the wallet owner can share access.</p>
+          )}
         </div>
       </div>
 
