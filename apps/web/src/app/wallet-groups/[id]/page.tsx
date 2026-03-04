@@ -35,6 +35,7 @@ export default function WalletGroupDetailPage() {
   const walletGroupId = params.id as string;
 
   const [walletGroup, setWalletGroup] = useState<WalletGroup | null>(null);
+  const [accessibleWalletIds, setAccessibleWalletIds] = useState<string[]>([]);
   const [loading, setLoading] = useState(true);
   const [walletName, setWalletName] = useState("");
   const [renaming, setRenaming] = useState(false);
@@ -43,9 +44,19 @@ export default function WalletGroupDetailPage() {
 
   async function loadWalletGroup() {
     try {
-      const data = await api.getWalletGroup(walletGroupId);
+      const [data, accessibleWallets] = await Promise.all([
+        api.getWalletGroup(walletGroupId),
+        api.getWallets(),
+      ]);
       setWalletGroup(data);
-    } catch {
+      setAccessibleWalletIds(accessibleWallets.map((wallet: Wallet) => wallet.id));
+    } catch (err: any) {
+      const status = err?.status;
+      if (status === 401 || status === 403) {
+        localStorage.removeItem("vencura_api_key");
+        router.push("/");
+        return;
+      }
       router.push("/dashboard");
     } finally {
       setLoading(false);
@@ -158,28 +169,44 @@ export default function WalletGroupDetailPage() {
           <p className="text-gray-500 text-sm">No wallets in this group yet.</p>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {walletGroup.wallets.map((wallet) => (
-              <div
-                key={wallet.id}
-                onClick={() => router.push(`/wallets/${wallet.id}`)}
-                className="p-4 bg-gray-900 border border-gray-800 rounded-lg cursor-pointer hover:border-gray-600 transition"
-              >
-                <h3 className="font-semibold mb-1">{wallet.name}</h3>
-                <a
-                  href={getSepoliaAddressUrl(wallet.address)}
-                  target="_blank"
-                  rel="noreferrer"
-                  onClick={(e) => e.stopPropagation()}
-                  className="text-xs text-blue-300 hover:text-blue-200 hover:underline font-mono mb-2 inline-block"
+            {walletGroup.wallets.map((wallet) => {
+              const isAccessible = accessibleWalletIds.includes(wallet.id);
+              return (
+                <div
+                  key={wallet.id}
+                  onClick={
+                    isAccessible
+                      ? () => router.push(`/wallets/${wallet.id}`)
+                      : undefined
+                  }
+                  className={`p-4 bg-gray-900 border border-gray-800 rounded-lg transition ${
+                    isAccessible
+                      ? "cursor-pointer hover:border-gray-600"
+                      : "cursor-not-allowed opacity-70"
+                  }`}
                 >
-                  {wallet.address}
-                </a>
-                <p className="text-sm font-mono">
-                  {formatBalance(wallet.balance)}{" "}
-                  <span className="text-xs text-gray-500">ETH</span>
-                </p>
-              </div>
-            ))}
+                  <h3 className="font-semibold mb-1">{wallet.name}</h3>
+                  <a
+                    href={getSepoliaAddressUrl(wallet.address)}
+                    target="_blank"
+                    rel="noreferrer"
+                    onClick={(e) => e.stopPropagation()}
+                    className="text-xs text-blue-300 hover:text-blue-200 hover:underline font-mono mb-2 inline-block"
+                  >
+                    {wallet.address}
+                  </a>
+                  <p className="text-sm font-mono">
+                    {formatBalance(wallet.balance)}{" "}
+                    <span className="text-xs text-gray-500">ETH</span>
+                  </p>
+                  {!isAccessible && (
+                    <p className="text-xs text-gray-500 mt-2">
+                      You do not have access to this wallet.
+                    </p>
+                  )}
+                </div>
+              );
+            })}
           </div>
         )}
       </div>
